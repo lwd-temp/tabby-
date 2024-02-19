@@ -11,7 +11,6 @@ use auth::{
     validate_jwt, AuthenticationService, Invitation, RefreshTokenError, RefreshTokenResponse,
     RegisterError, RegisterResponse, TokenAuthError, TokenAuthResponse, User, VerifyTokenResponse,
 };
-use futures::TryFutureExt;
 use job::{JobRun, JobService};
 use juniper::{
     graphql_object, graphql_value, EmptySubscription, FieldError, FieldResult, GraphQLObject,
@@ -72,8 +71,11 @@ pub enum CoreError {
     #[error("{0}")]
     Forbidden(&'static str),
 
-    #[error("Invalid ID Error")]
-    InvalidIDError,
+    #[error("Your license is not valid for this feature")]
+    InvalidLicense,
+
+    #[error("Invalid ID")]
+    InvalidID,
 
     #[error("Invalid input parameters")]
     InvalidInput(#[from] ValidationErrors),

@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use axum::{
-    body::StreamBody,
     extract::State,
-    http::HeaderValue,
-    response::{IntoResponse, Response},
+    response::sse::{Event, KeepAlive, Sse},
     Json,
 };
-use futures::StreamExt;
+use axum_extra::TypedHeader;
+use futures::{Stream, StreamExt};
 use tracing::instrument;
 
+use super::MaybeUser;
 use crate::services::chat::{ChatCompletionRequest, ChatService};
 
 #[utoipa::path(
@@ -30,17 +30,17 @@ use crate::services::chat::{ChatCompletionRequest, ChatService};
 #[instrument(skip(state, request))]
 pub async fn chat_completions(
     State(state): State<Arc<ChatService>>,
-    Json(request): Json<ChatCompletionRequest>,
-) -> Response {
+    TypedHeader(MaybeUser(user)): TypedHeader<MaybeUser>,
+    Json(mut request): Json<ChatCompletionRequest>,
+) -> Sse<impl Stream<Item = Result<Event, serde_json::Error>>> {
+    if let Some(user) = user {
+        request.user.replace(user);
+    }
+
     let stream = state.generate(request).await;
-    let s = stream.map(|chunk| match serde_json::to_string(&chunk) {
-        Ok(s) => Ok(format!("data: {s}\n\n")),
-        Err(e) => Err(anyhow::Error::from(e)),
-    });
-    let mut resp = StreamBody::new(s).into_response();
-    resp.headers_mut().append(
-        "Content-Type",
-        HeaderValue::from_str("text/event-stream").unwrap(),
-    );
-    resp
+    Sse::new(stream.map(|chunk| match serde_json::to_string(&chunk) {
+        Ok(s) => Ok(Event::default().data(s)),
+        Err(err) => Err(err),
+    }))
+    .keep_alive(KeepAlive::default())
 }

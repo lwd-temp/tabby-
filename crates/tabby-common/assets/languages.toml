@@ -224,6 +224,34 @@ top_level_keywords = [
 ]
 
 [[config]]
+languages = ["dart"]
+exts = ["dart"]
+line_comment = "//"
+top_level_keywords = [
+    "abstract",
+    "class",
+    "late",
+    "var",
+    "final",
+    "const",
+    "export",
+    "interface",
+    "type",
+    "enum",
+    "int",
+    "String",
+    "double",
+    "DateTime",
+    "typedef",
+]
+
+[[config]]
+languages = ["r"]
+exts = ["R", "r"]
+line_comment = "#"
+top_level_keywords = ["function", "library", "install.packages"]
+
+[[config]]
 languages = ["css"]
 exts = ["css"]
 
@@ -246,6 +274,30 @@ exts = ["jl"]
 [[config]]
 languages = ["lua"]
 exts = ["lua"]
+line_comment = "--"
+top_level_keywords = [
+    "and",
+    "break",
+    "do",
+    "else",
+    "elseif",
+    "end",
+    "false",
+    "for",
+    "function",
+    "if",
+    "in",
+    "local",
+    "nil",
+    "not",
+    "or",
+    "repeat",
+    "return",
+    "then",
+    "true",
+    "until",
+    "while"
+]
 
 [[config]]
 languages = ["makefile"]

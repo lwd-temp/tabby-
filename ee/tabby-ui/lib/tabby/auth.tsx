@@ -116,7 +116,7 @@ const logoutAllSessionsMutation = graphql(/* GraphQL */ `
 const AuthProvider: React.FunctionComponent<AuthProviderProps> = ({
   children
 }) => {
-  const initialized = React.useRef(false)
+  const [initialized, setInitialized] = React.useState(false)
   const [authToken] = useLocalStorage<AuthData | undefined>(
     AUTH_TOKEN_KEY,
     undefined
@@ -127,21 +127,20 @@ const AuthProvider: React.FunctionComponent<AuthProviderProps> = ({
   })
 
   React.useEffect(() => {
-    initialized.current = true
     if (authToken?.accessToken && authToken?.refreshToken) {
       dispatch({ type: AuthActionType.SignIn, data: authToken })
     } else {
       dispatch({ type: AuthActionType.SignOut })
     }
+    setInitialized(true)
   }, [])
 
   React.useEffect(() => {
-    if (!initialized.current) return
-
+    if (!initialized) return
     // After being mounted, listen for changes in the access token
     if (authToken?.accessToken && authToken?.refreshToken) {
       dispatch({ type: AuthActionType.Refresh, data: authToken })
-    } else {
+    } else if (!authToken?.accessToken && !authToken?.refreshToken) {
       dispatch({ type: AuthActionType.SignOut })
     }
   }, [authToken])
@@ -256,13 +255,14 @@ function useAuthenticatedSession() {
     if (status === 'authenticated') return
     if (isAdminInitialized === undefined) return
 
-    if (!isAdminInitialized) {
+    const isAdminSignup =
+      pathName === '/auth/signup' && searchParams.get('isAdmin') === 'true'
+
+    if (!isAdminSignup && !isAdminInitialized) {
       return router.replace('/auth/signup?isAdmin=true')
     }
 
-    const isAdminSignup =
-      pathName === '/auth/signup' && searchParams.get('isAdmin') === 'true'
-    if (!redirectWhitelist.includes(pathName) || isAdminSignup) {
+    if (!redirectWhitelist.includes(pathName)) {
       router.replace('/auth/signin')
     }
   }, [isAdminInitialized, status])

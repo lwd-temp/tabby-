@@ -4,13 +4,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use juniper::ID;
 use tabby_db::DbConn;
-use tracing::warn;
-
-use super::AsRowid;
-use crate::schema::{
+use tabby_schema::{
     analytic::{AnalyticService, CompletionStats, DiskUsage, DiskUsageStats, Language},
     Result,
 };
+use tracing::warn;
+
+use super::AsRowid;
 
 struct AnalyticServiceImpl {
     db: DbConn,
@@ -73,18 +73,16 @@ impl AnalyticService for AnalyticServiceImpl {
 
     async fn disk_usage_stats(&self) -> Result<DiskUsageStats> {
         Ok(DiskUsageStats {
-            events: recursive_dir_size(tabby_common::path::events_dir()).await?,
-            indexed_repositories: recursive_dir_size(tabby_common::path::dataset_dir())
-                .await?
-                .combine(recursive_dir_size(tabby_common::path::index_dir()).await?),
-            database: recursive_dir_size(crate::path::tabby_ee_root()).await?,
-            models: recursive_dir_size(tabby_common::path::models_dir()).await?,
+            events: dir_size(tabby_common::path::events_dir()).await?,
+            indexed_repositories: dir_size(tabby_common::path::index_dir()).await?,
+            database: dir_size(crate::path::tabby_ee_root()).await?,
+            models: dir_size(tabby_common::path::models_dir()).await?,
         })
     }
 }
 
 /// Calculate the size of a directory in kilobytes recursively
-async fn recursive_dir_size(path: PathBuf) -> Result<DiskUsage, anyhow::Error> {
+async fn dir_size(path: PathBuf) -> Result<DiskUsage, anyhow::Error> {
     let path_str = path.to_string_lossy().to_string();
 
     let size = if path.exists() {
@@ -96,8 +94,8 @@ async fn recursive_dir_size(path: PathBuf) -> Result<DiskUsage, anyhow::Error> {
     };
 
     Ok(DiskUsage {
-        file_paths: vec![path_str],
-        size: size as f64 / 1024.0,
+        filepath: vec![path_str],
+        size_kb: size as f64 / 1000.0,
     })
 }
 
@@ -139,7 +137,7 @@ mod tests {
     async fn test_daily_stats_in_past_year() {
         let db = DbConn::new_in_memory().await.unwrap();
         let user_id = db
-            .create_user("test@example.com".into(), Some("pass".into()), true)
+            .create_user("test@example.com".into(), Some("pass".into()), true, None)
             .await
             .unwrap();
 
@@ -158,7 +156,7 @@ mod tests {
             .unwrap();
 
         let user_id2 = db
-            .create_user("test2@example.com".into(), Some("pass".into()), false)
+            .create_user("test2@example.com".into(), Some("pass".into()), false, None)
             .await
             .unwrap();
 
@@ -212,7 +210,7 @@ mod tests {
     async fn test_daily_stats() {
         let db = DbConn::new_in_memory().await.unwrap();
         let user_id = db
-            .create_user("test@example.com".into(), Some("pass".into()), true)
+            .create_user("test@example.com".into(), Some("pass".into()), true, None)
             .await
             .unwrap();
 
@@ -256,7 +254,7 @@ mod tests {
         let db = DbConn::new_in_memory().await.unwrap();
 
         let user_id = db
-            .create_user("test@example.com".into(), Some("pass".into()), true)
+            .create_user("test@example.com".into(), Some("pass".into()), true, None)
             .await
             .unwrap();
 
@@ -303,7 +301,7 @@ mod tests {
         let service = new_analytic_service(db.clone());
 
         let id = db
-            .create_user("testuser".into(), None, false)
+            .create_user("testuser".into(), None, false, None)
             .await
             .unwrap();
 
@@ -340,7 +338,7 @@ mod tests {
 
         tokio::fs::write(
             tabby_common::path::models_dir().join("testfile"),
-            "0".repeat(1024).as_bytes(),
+            "0".repeat(1000).as_bytes(),
         )
         .await
         .unwrap();
@@ -350,9 +348,9 @@ mod tests {
 
         let disk_usage = service.disk_usage_stats().await.unwrap();
 
-        assert_eq!(disk_usage.events.size, 0.0);
-        assert_eq!(disk_usage.indexed_repositories.size, 0.0);
-        assert_eq!(disk_usage.database.size, 0.0);
-        assert_eq!(disk_usage.models.size, 1.0);
+        assert_eq!(disk_usage.events.size_kb, 0.0);
+        assert_eq!(disk_usage.indexed_repositories.size_kb, 0.0);
+        assert_eq!(disk_usage.database.size_kb, 0.0);
+        assert_eq!(disk_usage.models.size_kb, 1.0);
     }
 }

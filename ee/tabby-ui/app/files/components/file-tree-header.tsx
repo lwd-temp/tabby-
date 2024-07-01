@@ -1,19 +1,36 @@
 'use client'
 
 import React, { useContext } from 'react'
-import { isEmpty } from 'lodash-es'
+import { isNil } from 'lodash-es'
 import { useQuery } from 'urql'
 
 import { graphql } from '@/lib/gql/generates'
+import { RepositoryKind } from '@/lib/gql/generates/graphql'
 import { useDebounceCallback } from '@/lib/hooks/use-debounce'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList
+} from '@/components/ui/command'
+import {
+  IconCheck,
   IconClose,
   IconDirectorySolid,
   IconFile,
-  IconFolderGit
+  IconFolderGit,
+  IconGitFork,
+  IconTag
 } from '@/components/ui/icons'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger
+} from '@/components/ui/popover'
 import {
   Select,
   SelectContent,
@@ -21,6 +38,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   SearchableSelect,
   SearchableSelectAnchor,
@@ -28,18 +46,15 @@ import {
   SearchableSelectInput,
   SearchableSelectOption
 } from '@/components/searchable-select'
-import { useTopbarProgress } from '@/components/topbar-progress-indicator'
 
 import { RepositoryKindIcon } from './repository-kind-icon'
-import { SourceCodeBrowserContext, TFileMap } from './source-code-browser'
+import { SourceCodeBrowserContext } from './source-code-browser'
 import {
-  fetchEntriesFromPath,
-  getDirectoriesFromBasename,
-  key2RepositoryKind,
-  resolveFileNameFromPath,
-  resolveRepoIdFromPath,
-  resolveRepoKindFromPath,
-  resolveRepoSpecifierFromPath
+  generateEntryPath,
+  getDefaultRepoRef,
+  repositoryMap2List,
+  resolveRepoRef,
+  resolveRepoSpecifierFromRepoInfo
 } from './utils'
 
 interface FileTreeHeaderProps extends React.HTMLAttributes<HTMLDivElement> {}
@@ -51,9 +66,16 @@ type SearchOption = {
   id: string
 }
 
+type RepositoryRefKind = 'branch' | 'tag'
+
 const repositorySearch = graphql(/* GraphQL */ `
-  query RepositorySearch($kind: RepositoryKind!, $id: ID!, $pattern: String!) {
-    repositorySearch(kind: $kind, id: $id, pattern: $pattern) {
+  query RepositorySearch(
+    $kind: RepositoryKind!
+    $id: ID!
+    $rev: String
+    $pattern: String!
+  ) {
+    repositorySearch(kind: $kind, id: $id, rev: $rev, pattern: $pattern) {
       type
       path
       indices
@@ -67,26 +89,38 @@ const FileTreeHeader: React.FC<FileTreeHeaderProps> = ({
 }) => {
   const {
     activePath,
-    fileTreeData,
-    setActivePath,
+    updateActivePath,
     initialized,
-    updateFileMap,
-    setExpandedKeys,
-    fileMap
+    activeRepo,
+    activeRepoRef,
+    fileMap,
+    repoMap,
+    activeEntryInfo
   } = useContext(SourceCodeBrowserContext)
-  const { setProgress } = useTopbarProgress()
-
-  const repoSpecifier = resolveRepoSpecifierFromPath(activePath)
-  const repoKind = resolveRepoKindFromPath(activePath)
-  const repoId = resolveRepoIdFromPath(activePath)
-  const currentRepoKind = React.useMemo(() => {
-    if (!repoSpecifier || isEmpty(fileMap)) return undefined
-    return fileMap?.[repoSpecifier]?.repository?.kind
-  }, [repoSpecifier, fileMap])
-  const currentRepoName = React.useMemo(() => {
-    if (!repoSpecifier || isEmpty(fileMap)) return undefined
-    return fileMap?.[repoSpecifier]?.name
-  }, [repoSpecifier, fileMap])
+  const repoList = React.useMemo(() => {
+    return repositoryMap2List(repoMap).map(repo => {
+      const repoSpecifier = resolveRepoSpecifierFromRepoInfo(repo) as string
+      return {
+        repo,
+        repoSpecifier
+      }
+    })
+  }, [repoMap])
+  const [refSelectVisible, setRefSelectVisible] = React.useState(false)
+  const [activeRefKind, setActiveRefKind] = React.useState<RepositoryRefKind>(
+    activeRepoRef?.kind ?? 'branch'
+  )
+  const { repositoryKind, repositoryName, repositorySpecifier } =
+    activeEntryInfo
+  const repoId = activeRepo?.id
+  const refs = activeRepo?.refs
+  const formattedRefs = React.useMemo(() => {
+    if (!refs?.length) return []
+    return refs.map(ref => resolveRepoRef(ref))
+  }, [refs])
+  const branches = formattedRefs.filter(o => o.kind === 'branch')
+  const tags = formattedRefs.filter(o => o.kind === 'tag')
+  const commandOptions = activeRefKind === 'tag' ? tags : branches
 
   const inputRef = React.useRef<HTMLInputElement>(null)
   const [input, setInput] = React.useState<string>()
@@ -95,17 +129,29 @@ const FileTreeHeader: React.FC<FileTreeHeaderProps> = ({
   const [options, setOptions] = React.useState<Array<SearchOption>>()
   const [optionsVisible, setOptionsVisible] = React.useState(false)
 
-  const noIndexedRepo = initialized && !fileTreeData?.length
+  const noIndexedRepo = initialized && !repoList?.length
 
   const [{ data: repositorySearchData }] = useQuery({
     query: repositorySearch,
     variables: {
-      kind: key2RepositoryKind(repoKind),
-      id: repoId,
-      pattern: repositorySearchPattern ?? ''
+      kind: repositoryKind as RepositoryKind,
+      id: repoId as string,
+      pattern: repositorySearchPattern ?? '',
+      rev: activeRepoRef?.name
     },
-    pause: !repoSpecifier || !repositorySearchPattern
+    pause: !repoId || !repositoryKind || !repositorySearchPattern
   })
+
+  const onSelectRef = (ref: string) => {
+    if (isNil(ref)) return
+    const nextRev = resolveRepoRef(ref)?.name ?? ''
+    const { basename = '' } = activeEntryInfo
+    const kind = fileMap?.[basename]?.file?.kind ?? 'dir'
+
+    // clear repository search
+    setInput(undefined)
+    updateActivePath(generateEntryPath(activeRepo, nextRev, basename, kind))
+  }
 
   React.useEffect(() => {
     const _options =
@@ -117,8 +163,16 @@ const FileTreeHeader: React.FC<FileTreeHeaderProps> = ({
     setOptionsVisible(!!repositorySearchPattern)
   }, [repositorySearchData?.repositorySearch])
 
-  const onSelectRepo = (name: string) => {
-    setActivePath(name)
+  const onSelectRepo = (repoSpecifier: string) => {
+    const repo = repoList.find(o => o.repoSpecifier === repoSpecifier)?.repo
+    if (repo) {
+      const path = `${repoSpecifier}/-/tree/${
+        resolveRepoRef(getDefaultRepoRef(repo.refs)).name
+      }`
+      // clear repository search
+      setInput(undefined)
+      updateActivePath(path)
+    }
   }
 
   const onInputValueChange = useDebounceCallback((v: string | undefined) => {
@@ -137,46 +191,14 @@ const FileTreeHeader: React.FC<FileTreeHeaderProps> = ({
   }
 
   const onSelectFile = async (value: SearchOption) => {
-    const path = value.path
-    if (!path) return
-
-    const fullPath = `${repoSpecifier}/${path}`
-    try {
-      setProgress(true)
-      const entries = await fetchEntriesFromPath(fullPath)
-      const initialExpandedDirs = getDirectoriesFromBasename(path)
-
-      const patchMap: TFileMap = {}
-      // fetch dirs
-      for (const entry of entries) {
-        const path = `${repoSpecifier}/${entry.basename}`
-        patchMap[path] = {
-          file: entry,
-          name: resolveFileNameFromPath(path),
-          fullPath: path,
-          treeExpanded: initialExpandedDirs.includes(entry.basename)
-        }
-      }
-      const expandedKeys = initialExpandedDirs.map(dir =>
-        [repoSpecifier, dir].filter(Boolean).join('/')
-      )
-      if (patchMap) {
-        updateFileMap(patchMap)
-      }
-      if (expandedKeys?.length) {
-        setExpandedKeys(prevKeys => {
-          const newSet = new Set(prevKeys)
-          for (const k of expandedKeys) {
-            newSet.add(k)
-          }
-          return newSet
-        })
-      }
-    } catch (e) {
-    } finally {
-      setActivePath(fullPath)
-      setProgress(false)
-    }
+    if (!value.path) return
+    const path = generateEntryPath(
+      activeRepo,
+      activeRepoRef?.name,
+      value.path,
+      value.type as any
+    )
+    updateActivePath(path)
   }
 
   // shortcut 't'
@@ -209,22 +231,28 @@ const FileTreeHeader: React.FC<FileTreeHeaderProps> = ({
     <div className={cn(className)} {...props}>
       <div className="py-4 font-bold leading-8">Files</div>
       <div className="space-y-3">
+        {/* Repository select */}
         <Select
           disabled={!initialized}
           onValueChange={onSelectRepo}
-          value={repoSpecifier}
+          value={repositorySpecifier}
         >
           <SelectTrigger>
-            <SelectValue>
-              <div className="flex items-center gap-2">
-                <RepositoryKindIcon
-                  kind={currentRepoKind}
-                  fallback={<IconFolderGit />}
-                />
+            <SelectValue asChild>
+              <div className="flex items-center gap-2 overflow-hidden">
+                <div className="shrink-0">
+                  <RepositoryKindIcon
+                    kind={repositoryKind}
+                    fallback={<IconFolderGit />}
+                  />
+                </div>
                 <span
-                  className={currentRepoName ? '' : 'text-muted-foreground'}
+                  className={cn(
+                    'truncate',
+                    !repositoryName && 'text-muted-foreground'
+                  )}
                 >
-                  {currentRepoName || 'Pick a repository'}
+                  {repositoryName || 'Pick a repository'}
                 </span>
               </div>
             </SelectValue>
@@ -236,15 +264,18 @@ const FileTreeHeader: React.FC<FileTreeHeaderProps> = ({
               </SelectItem>
             ) : (
               <>
-                {fileTreeData?.map(repo => {
+                {repoList?.map(repo => {
                   return (
-                    <SelectItem key={repo.fullPath} value={repo.fullPath}>
+                    <SelectItem
+                      key={repo.repoSpecifier}
+                      value={repo.repoSpecifier}
+                    >
                       <div className="flex items-center gap-1">
                         <RepositoryKindIcon
-                          kind={repo?.repository?.kind}
+                          kind={repo.repo.kind}
                           fallback={<IconFolderGit />}
                         />
-                        {repo.name}
+                        {repo.repo.name}
                       </div>
                     </SelectItem>
                   )
@@ -253,6 +284,78 @@ const FileTreeHeader: React.FC<FileTreeHeaderProps> = ({
             )}
           </SelectContent>
         </Select>
+        {/* branch select */}
+        <Popover open={refSelectVisible} onOpenChange={setRefSelectVisible}>
+          <PopoverTrigger asChild>
+            <Button
+              className="w-full justify-start gap-2 px-3"
+              variant="outline"
+            >
+              {!!activeRepoRef && (
+                <>
+                  {activeRepoRef.kind === 'branch' ? (
+                    <IconGitFork className="shrink-0" />
+                  ) : (
+                    <IconTag className="shrink-0" />
+                  )}
+                  <span className="truncate" title={activeRepoRef.name}>
+                    {activeRepoRef.name ?? ''}
+                  </span>
+                </>
+              )}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            className="w-[var(--radix-popover-trigger-width)] p-0"
+            align="start"
+            side="bottom"
+          >
+            <Command className="transition-all">
+              <CommandInput
+                placeholder={
+                  activeRefKind === 'tag' ? 'Find a tag' : 'Find a branch'
+                }
+              />
+              <Tabs
+                className="my-1 border-b"
+                value={activeRefKind}
+                onValueChange={v => setActiveRefKind(v as RepositoryRefKind)}
+              >
+                <TabsList className="bg-popover py-0">
+                  <TabsTrigger value="branch">Branches</TabsTrigger>
+                  <TabsTrigger value="tag">Tags</TabsTrigger>
+                </TabsList>
+              </Tabs>
+              <CommandList className="max-h-[30vh]">
+                <CommandEmpty>Nothing to show</CommandEmpty>
+                <CommandGroup>
+                  {commandOptions.map((ref, refIndex) => (
+                    <CommandItem
+                      key={ref.ref ?? refIndex}
+                      onSelect={() => {
+                        setRefSelectVisible(false)
+                        onSelectRef(ref.ref)
+                      }}
+                    >
+                      <IconCheck
+                        className={cn(
+                          'mr-2 shrink-0',
+                          !!ref?.name && ref.name === activeRepoRef?.name
+                            ? 'opacity-100'
+                            : 'opacity-0'
+                        )}
+                      />
+                      <span className="truncate" title={ref.name}>
+                        {ref.name ?? ''}
+                      </span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </CommandList>
+            </Command>
+          </PopoverContent>
+        </Popover>
+        {/* Go to file */}
         <SearchableSelect
           stayOpenOnInputClick
           options={options}
@@ -277,7 +380,7 @@ const FileTreeHeader: React.FC<FileTreeHeaderProps> = ({
                       spellCheck={false}
                       value={input}
                       ref={inputRef}
-                      disabled={!currentRepoName}
+                      disabled={!repositoryName}
                       onClick={e => {
                         if (repositorySearchPattern && !optionsVisible) {
                           setOptionsVisible(true)
@@ -391,7 +494,12 @@ const HighlightMatches = ({
     <p className="text-muted-foreground">
       {text.split('').map((char, index) => {
         return indicesSet.has(index) ? (
-          <span className="font-semibold text-foreground">{char}</span>
+          <span
+            className="font-semibold text-foreground"
+            key={`${char}_${index}`}
+          >
+            {char}
+          </span>
         ) : (
           char
         )

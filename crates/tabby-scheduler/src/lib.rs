@@ -1,93 +1,112 @@
 //! Responsible for scheduling all of the background jobs for tabby.
 //! Includes syncing respositories and updating indices.
+
 mod code;
-mod dataset;
-mod index;
-mod repository;
-mod utils;
+mod crawl;
+mod indexer;
 
-use std::{fs, sync::Arc};
+pub use code::CodeIndexer;
+use crawl::crawl_pipeline;
+use doc::create_web_builder;
+pub use doc::{DocIndexer, WebDocument};
+use futures::StreamExt;
+use indexer::{IndexAttributeBuilder, Indexer};
+use tabby_common::index::corpus;
+use tabby_inference::Embedding;
 
-use anyhow::Result;
-use tabby_common::{
-    config::{RepositoryAccess, RepositoryConfig},
-    path,
-};
-use tokio_cron_scheduler::{Job, JobScheduler};
-use tracing::{error, info, warn};
+mod doc;
+use std::sync::Arc;
 
-pub async fn scheduler<T: RepositoryAccess + 'static>(now: bool, access: T) -> Result<()> {
-    if now {
-        let repositories = access.list_repositories().await?;
-        job_sync(&repositories)?;
-        job_index(&repositories)?;
-    } else {
-        let access = Arc::new(access);
-        let scheduler = JobScheduler::new().await?;
-        let scheduler_mutex = Arc::new(tokio::sync::Mutex::new(()));
+use crate::doc::SourceDocument;
 
-        // Every 10 minutes
-        scheduler
-            .add(Job::new_async("0 1/10 * * * *", move |_, _| {
-                let access = access.clone();
-                let scheduler_mutex = scheduler_mutex.clone();
-                Box::pin(async move {
-                    let Ok(_guard) = scheduler_mutex.try_lock() else {
-                        warn!("Scheduler job overlapped, skipping...");
-                        return;
-                    };
+pub async fn crawl_index_docs(
+    source_id: &str,
+    start_url: &str,
+    embedding: Arc<dyn Embedding>,
+) -> anyhow::Result<()> {
+    logkit::info!("Starting doc index pipeline for {}", start_url);
+    let embedding = embedding.clone();
+    let mut num_docs = 0;
+    let builder = create_web_builder(embedding.clone());
+    let indexer = Indexer::new(corpus::WEB);
 
-                    let repositories = access
-                        .list_repositories()
-                        .await
-                        .expect("Must be able to retrieve repositories for sync");
-                    if let Err(e) = job_sync(&repositories) {
-                        error!("{e}");
-                    }
-                    if let Err(e) = job_index(&repositories) {
-                        error!("{e}")
-                    }
-                })
-            })?)
-            .await?;
+    let mut pipeline = Box::pin(crawl_pipeline(start_url).await?);
+    while let Some(doc) = pipeline.next().await {
+        logkit::info!("Fetching {}", doc.url);
+        let source_doc = SourceDocument {
+            source_id: source_id.to_owned(),
+            id: doc.url.clone(),
+            title: doc.metadata.title.unwrap_or_default(),
+            link: doc.url,
+            body: doc.markdown,
+        };
 
-        info!("Scheduler activated...");
-        scheduler.start().await?;
+        num_docs += 1;
 
-        // Sleep 10 years (indefinitely)
-        tokio::time::sleep(tokio::time::Duration::from_secs(3600 * 24 * 365 * 10)).await;
+        let (id, s) = builder.build(source_doc).await;
+        indexer.delete(&id);
+        s.buffer_unordered(std::cmp::max(
+            std::thread::available_parallelism().unwrap().get() * 2,
+            32,
+        ))
+        .for_each(|doc| async {
+            if let Ok(Some(doc)) = doc {
+                indexer.add(doc).await;
+            }
+        })
+        .await;
+    }
+    logkit::info!("Crawled {} documents from '{}'", num_docs, start_url);
+    indexer.commit();
+    Ok(())
+}
+
+pub fn run_index_garbage_collection(active_sources: Vec<(String, String)>) -> anyhow::Result<()> {
+    let corpus_list = [corpus::WEB, corpus::CODE];
+    for corpus in corpus_list.iter() {
+        let active_sources: Vec<_> = active_sources
+            .iter()
+            .filter(|(c, _)| c == corpus)
+            .map(|(_, source_id)| source_id.to_owned())
+            .collect();
+        let indexer = Indexer::new(corpus);
+        indexer.garbage_collect(&active_sources)?;
+        indexer.commit();
     }
 
     Ok(())
 }
 
-fn job_index(repositories: &[RepositoryConfig]) -> Result<()> {
-    println!("Indexing repositories...");
-    let ret = index::index_repositories(repositories);
-    if let Err(err) = ret {
-        let index_dir = path::index_dir();
-        warn!(
-            "Failed to index repositories: {}, removing index directory '{}'...",
-            err,
-            index_dir.display()
-        );
-        fs::remove_dir_all(index_dir)?;
-        return Err(err.context("Failed to index repositories"));
-    }
-    Ok(())
-}
+mod tantivy_utils {
+    use std::{fs, path::Path};
 
-fn job_sync(repositories: &[RepositoryConfig]) -> Result<()> {
-    println!("Syncing {} repositories...", repositories.len());
-    let ret = repository::sync_repositories(repositories);
-    if let Err(err) = ret {
-        return Err(err.context("Failed to sync repositories"));
+    use tantivy::{directory::MmapDirectory, schema::Schema, Index};
+    use tracing::{debug, warn};
+
+    pub fn open_or_create_index(code: &Schema, path: &Path) -> (bool, Index) {
+        let (recreated, index) = match open_or_create_index_impl(code, path) {
+            Ok(index) => (false, index),
+            Err(err) => {
+                warn!(
+                    "Failed to open index repositories: {}, removing index directory '{}'...",
+                    err,
+                    path.display()
+                );
+                fs::remove_dir_all(path).expect("Failed to remove index directory");
+
+                debug!("Reopening index repositories...");
+                (
+                    true,
+                    open_or_create_index_impl(code, path).expect("Failed to open index"),
+                )
+            }
+        };
+        (recreated, index)
     }
 
-    println!("Building dataset...");
-    let ret = dataset::create_dataset(repositories);
-    if let Err(err) = ret {
-        return Err(err.context("Failed to build dataset"));
+    fn open_or_create_index_impl(code: &Schema, path: &Path) -> tantivy::Result<Index> {
+        fs::create_dir_all(path).expect("Failed to create index directory");
+        let directory = MmapDirectory::open(path).expect("Failed to open index directory");
+        Index::open_or_create(directory, code.clone())
     }
-    Ok(())
 }

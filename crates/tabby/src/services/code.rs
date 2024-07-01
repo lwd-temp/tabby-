@@ -1,154 +1,243 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use cached::{CachedAsync, TimedCache};
 use parse_git_url::GitUrl;
 use tabby_common::{
-    api::code::{CodeSearch, CodeSearchError, Hit, HitDocument, SearchResponse},
-    config::{RepositoryAccess, RepositoryConfig},
-    index::{self, register_tokenizers, CodeSearchSchema},
-    path,
+    api::code::{
+        CodeSearch, CodeSearchDocument, CodeSearchError, CodeSearchHit, CodeSearchQuery,
+        CodeSearchResponse, CodeSearchScores,
+    },
+    config::{ConfigAccess, RepositoryConfig},
+    index::{
+        self,
+        code::{self, tokenize_code},
+        IndexSchema,
+    },
 };
+use tabby_inference::Embedding;
 use tantivy::{
-    collector::{Count, TopDocs},
-    query::{BooleanQuery, QueryParser},
-    query_grammar::Occur,
-    schema::Field,
-    DocAddress, Document, Index, IndexReader,
+    collector::TopDocs,
+    schema::{self, Value},
+    IndexReader, TantivyDocument,
 };
-use tokio::{sync::Mutex, time::sleep};
-use tracing::{debug, log::info};
+use tokio::sync::Mutex;
+use tracing::debug;
+
+use super::tantivy::IndexReaderProvider;
 
 struct CodeSearchImpl {
-    reader: IndexReader,
-    query_parser: QueryParser,
-
-    schema: CodeSearchSchema,
-    repository_access: Arc<dyn RepositoryAccess>,
+    config_access: Arc<dyn ConfigAccess>,
+    embedding: Arc<dyn Embedding>,
     repo_cache: Mutex<TimedCache<(), Vec<RepositoryConfig>>>,
 }
 
 impl CodeSearchImpl {
-    fn load(repository_access: Arc<dyn RepositoryAccess>) -> Result<Self> {
-        let code_schema = index::CodeSearchSchema::new();
-        let index = Index::open_in_dir(path::index_dir())?;
-        register_tokenizers(&index);
-
-        let query_parser = QueryParser::new(
-            code_schema.schema.clone(),
-            vec![code_schema.field_body],
-            index.tokenizers().clone(),
-        );
-        let reader = index
-            .reader_builder()
-            .reload_policy(tantivy::ReloadPolicy::OnCommit)
-            .try_into()?;
-        Ok(Self {
-            repository_access,
-            reader,
-            query_parser,
-            schema: code_schema,
+    fn new(config_access: Arc<dyn ConfigAccess>, embedding: Arc<dyn Embedding>) -> Self {
+        Self {
+            config_access,
+            embedding,
             repo_cache: Mutex::new(TimedCache::with_lifespan(10 * 60)),
-        })
-    }
-
-    async fn load_async(repository_access: Arc<dyn RepositoryAccess>) -> CodeSearchImpl {
-        loop {
-            match CodeSearchImpl::load(repository_access.clone()) {
-                Ok(code) => {
-                    info!("Index is ready, enabling server...");
-                    return code;
-                }
-                Err(err) => {
-                    debug!("Source code index is not ready `{}`", err);
-                }
-            };
-
-            sleep(Duration::from_secs(60)).await;
-        }
-    }
-
-    fn create_hit(&self, score: f32, doc: Document, doc_address: DocAddress) -> Hit {
-        Hit {
-            score,
-            doc: HitDocument {
-                body: get_field(&doc, self.schema.field_body),
-                filepath: get_field(&doc, self.schema.field_filepath),
-                git_url: get_field(&doc, self.schema.field_git_url),
-                language: get_field(&doc, self.schema.field_language),
-            },
-            id: doc_address.doc_id,
         }
     }
 
     async fn search_with_query(
         &self,
+        reader: &IndexReader,
         q: &dyn tantivy::query::Query,
         limit: usize,
-        offset: usize,
-    ) -> Result<SearchResponse, CodeSearchError> {
-        let searcher = self.reader.searcher();
-        let (top_docs, num_hits) =
-            { searcher.search(q, &(TopDocs::with_limit(limit).and_offset(offset), Count))? };
-        let hits: Vec<Hit> = {
-            top_docs
-                .iter()
-                .map(|(score, doc_address)| {
-                    let doc = searcher.doc(*doc_address).unwrap();
-                    self.create_hit(*score, doc, *doc_address)
-                })
-                .collect()
-        };
-        Ok(SearchResponse { num_hits, hits })
-    }
-}
-
-#[async_trait]
-impl CodeSearch for CodeSearchImpl {
-    async fn search(
-        &self,
-        q: &str,
-        limit: usize,
-        offset: usize,
-    ) -> Result<SearchResponse, CodeSearchError> {
-        let query = self.query_parser.parse_query(q)?;
-        self.search_with_query(&query, limit, offset).await
+    ) -> Result<Vec<(f32, TantivyDocument)>, CodeSearchError> {
+        let searcher = reader.searcher();
+        let top_docs = { searcher.search(q, &(TopDocs::with_limit(limit)))? };
+        let top_docs = top_docs
+            .iter()
+            .map(|(score, doc_address)| {
+                let doc: TantivyDocument = searcher.doc(*doc_address).unwrap();
+                (*score, doc)
+            })
+            .collect();
+        Ok(top_docs)
     }
 
     async fn search_in_language(
         &self,
-        git_url: &str,
-        language: &str,
-        tokens: &[String],
+        reader: &IndexReader,
+        mut query: CodeSearchQuery,
         limit: usize,
-        offset: usize,
-    ) -> Result<SearchResponse, CodeSearchError> {
-        let language_query = self.schema.language_query(language);
-        let body_query = self.schema.body_query(tokens);
-
+    ) -> Result<CodeSearchResponse, CodeSearchError> {
         let mut cache = self.repo_cache.lock().await;
 
         let repos = cache
             .try_get_or_set_with((), || async {
-                let repos = self.repository_access.list_repositories().await?;
+                let repos = self.config_access.repositories().await?;
                 Ok::<_, anyhow::Error>(repos)
             })
             .await?;
 
-        let Some(git_url) = closest_match(git_url, repos.iter()) else {
-            return Ok(SearchResponse::default());
+        let Some(git_url) = closest_match(&query.git_url, repos.iter()) else {
+            return Ok(CodeSearchResponse::default());
         };
 
-        let git_url_query = self.schema.git_url_query(git_url);
+        debug!(
+            "query.git_url: {:?}, matched git_url: {:?}",
+            query.git_url, git_url
+        );
 
-        let query = BooleanQuery::new(vec![
-            (Occur::Must, language_query),
-            (Occur::Must, body_query),
-            (Occur::Must, git_url_query),
-        ]);
-        self.search_with_query(&query, limit, offset).await
+        query.git_url = git_url.to_owned();
+
+        let docs_from_embedding = {
+            let embedding = self.embedding.embed(&query.content).await?;
+            let embedding_tokens_query = Box::new(index::embedding_tokens_query(
+                embedding.len(),
+                embedding.iter(),
+            ));
+
+            let query = code::code_search_query(&query, embedding_tokens_query);
+            self.search_with_query(reader, &query, limit * 2).await?
+        };
+
+        let docs_from_bm25 = {
+            let body_tokens = tokenize_code(&query.content);
+            let body_query = code::body_query(&body_tokens);
+
+            let query = code::code_search_query(&query, body_query);
+            self.search_with_query(reader, &query, limit * 2).await?
+        };
+
+        Ok(merge_code_responses_by_rank(
+            docs_from_embedding,
+            docs_from_bm25,
+            limit,
+        ))
     }
+}
+
+const RANK_CONSTANT: f32 = 60.0;
+const EMBEDDING_SCORE_THRESHOLD: f32 = 0.75;
+const BM25_SCORE_THRESHOLD: f32 = 8.0;
+const RRF_SCORE_THRESHOLD: f32 = 0.028;
+
+fn merge_code_responses_by_rank(
+    embedding_resp: Vec<(f32, TantivyDocument)>,
+    bm25_resp: Vec<(f32, TantivyDocument)>,
+    limit: usize,
+) -> CodeSearchResponse {
+    let mut scored_hits: HashMap<String, (CodeSearchScores, TantivyDocument)> = HashMap::default();
+
+    for (rank, embedding, doc) in compute_rank_score(embedding_resp).into_iter() {
+        let scores = CodeSearchScores {
+            rrf: rank,
+            embedding,
+            ..Default::default()
+        };
+
+        scored_hits.insert(get_chunk_id(&doc).to_owned(), (scores, doc));
+    }
+
+    for (rank, bm25, doc) in compute_rank_score(bm25_resp).into_iter() {
+        let chunk_id = get_chunk_id(&doc);
+        // Only keep items with embedding score > 0.
+        if let Some((score, _)) = scored_hits.get_mut(chunk_id) {
+            score.rrf += rank;
+            score.bm25 = bm25;
+        }
+    }
+
+    let mut scored_hits: Vec<CodeSearchHit> = scored_hits
+        .into_values()
+        .map(|(scores, doc)| create_hit(scores, doc))
+        .collect();
+    scored_hits.sort_by(|a, b| b.scores.rrf.total_cmp(&a.scores.rrf));
+    CodeSearchResponse {
+        hits: scored_hits
+            .into_iter()
+            .filter(|hit| {
+                hit.scores.bm25 > BM25_SCORE_THRESHOLD
+                    && hit.scores.embedding > EMBEDDING_SCORE_THRESHOLD
+                    && hit.scores.rrf > RRF_SCORE_THRESHOLD
+            })
+            .take(limit)
+            .collect(),
+    }
+}
+
+fn compute_rank_score(resp: Vec<(f32, TantivyDocument)>) -> Vec<(f32, f32, TantivyDocument)> {
+    resp.into_iter()
+        .enumerate()
+        .map(|(rank, (score, doc))| (1.0 / (RANK_CONSTANT + (rank + 1) as f32), score, doc))
+        .collect()
+}
+
+fn get_chunk_id(doc: &TantivyDocument) -> &str {
+    let schema = IndexSchema::instance();
+    get_text(doc, schema.field_chunk_id)
+}
+
+fn create_hit(scores: CodeSearchScores, doc: TantivyDocument) -> CodeSearchHit {
+    let schema = IndexSchema::instance();
+    let doc = CodeSearchDocument {
+        file_id: get_text(&doc, schema.field_id).to_owned(),
+        chunk_id: get_text(&doc, schema.field_chunk_id).to_owned(),
+        body: get_json_text_field(
+            &doc,
+            schema.field_chunk_attributes,
+            code::fields::CHUNK_BODY,
+        )
+        .to_owned(),
+        filepath: get_json_text_field(
+            &doc,
+            schema.field_chunk_attributes,
+            code::fields::CHUNK_FILEPATH,
+        )
+        .to_owned(),
+        git_url: get_json_text_field(
+            &doc,
+            schema.field_chunk_attributes,
+            code::fields::CHUNK_GIT_URL,
+        )
+        .to_owned(),
+        language: get_json_text_field(
+            &doc,
+            schema.field_chunk_attributes,
+            code::fields::CHUNK_LANGUAGE,
+        )
+        .to_owned(),
+        start_line: get_json_number_field(
+            &doc,
+            schema.field_chunk_attributes,
+            code::fields::CHUNK_START_LINE,
+        ) as usize,
+    };
+    CodeSearchHit { scores, doc }
+}
+
+fn get_text(doc: &TantivyDocument, field: schema::Field) -> &str {
+    doc.get_first(field).unwrap().as_str().unwrap()
+}
+
+fn get_json_number_field(doc: &TantivyDocument, field: schema::Field, name: &str) -> i64 {
+    doc.get_first(field)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .find(|(k, _)| *k == name)
+        .unwrap()
+        .1
+        .as_i64()
+        .unwrap()
+}
+
+fn get_json_text_field<'a>(doc: &'a TantivyDocument, field: schema::Field, name: &str) -> &'a str {
+    doc.get_first(field)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .find(|(k, _)| *k == name)
+        .unwrap()
+        .1
+        .as_str()
+        .unwrap()
 }
 
 fn closest_match<'a>(
@@ -165,64 +254,41 @@ fn closest_match<'a>(
         .map(|x| x.git_url.as_str())
 }
 
-fn get_field(doc: &Document, field: Field) -> String {
-    doc.get_first(field)
-        .and_then(|x| x.as_text())
-        .expect("Missing field")
-        .to_owned()
-}
-
 struct CodeSearchService {
-    search: Arc<Mutex<Option<CodeSearchImpl>>>,
+    imp: CodeSearchImpl,
+    provider: Arc<IndexReaderProvider>,
 }
 
 impl CodeSearchService {
-    pub fn new(repository_access: Arc<dyn RepositoryAccess>) -> Self {
-        let search = Arc::new(Mutex::new(None));
-
-        let ret = Self {
-            search: search.clone(),
-        };
-
-        tokio::spawn(async move {
-            let code = CodeSearchImpl::load_async(repository_access).await;
-            *search.lock().await = Some(code);
-        });
-
-        ret
+    pub fn new(
+        config_access: Arc<dyn ConfigAccess>,
+        embedding: Arc<dyn Embedding>,
+        provider: Arc<IndexReaderProvider>,
+    ) -> Self {
+        Self {
+            imp: CodeSearchImpl::new(config_access, embedding),
+            provider,
+        }
     }
 }
 
-pub fn create_code_search(repository_access: Arc<dyn RepositoryAccess>) -> impl CodeSearch {
-    CodeSearchService::new(repository_access)
+pub fn create_code_search(
+    config_access: Arc<dyn ConfigAccess>,
+    embedding: Arc<dyn Embedding>,
+    provider: Arc<IndexReaderProvider>,
+) -> impl CodeSearch {
+    CodeSearchService::new(config_access, embedding, provider)
 }
 
 #[async_trait]
 impl CodeSearch for CodeSearchService {
-    async fn search(
-        &self,
-        q: &str,
-        limit: usize,
-        offset: usize,
-    ) -> Result<SearchResponse, CodeSearchError> {
-        if let Some(imp) = self.search.lock().await.as_ref() {
-            imp.search(q, limit, offset).await
-        } else {
-            Err(CodeSearchError::NotReady)
-        }
-    }
-
     async fn search_in_language(
         &self,
-        git_url: &str,
-        language: &str,
-        tokens: &[String],
+        query: CodeSearchQuery,
         limit: usize,
-        offset: usize,
-    ) -> Result<SearchResponse, CodeSearchError> {
-        if let Some(imp) = self.search.lock().await.as_ref() {
-            imp.search_in_language(git_url, language, tokens, limit, offset)
-                .await
+    ) -> Result<CodeSearchResponse, CodeSearchError> {
+        if let Some(reader) = self.provider.reader().await.as_ref() {
+            self.imp.search_in_language(reader, query, limit).await
         } else {
             Err(CodeSearchError::NotReady)
         }
@@ -325,6 +391,14 @@ mod tests {
         assert_match_first!(
             "https://custom-git.com/tabby",
             ["https://custom-git.com/TabbyML/tabby"]
+        );
+    }
+
+    #[test]
+    fn test_closest_match_local_url() {
+        assert_match_first!(
+            "git@github.com:TabbyML/tabby.git",
+            ["file:///home/TabbyML/tabby"]
         );
     }
 }

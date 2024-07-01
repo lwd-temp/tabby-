@@ -11,14 +11,32 @@ pub struct JobRunDAO {
     pub id: i64,
     #[sqlx(rename = "job")]
     pub name: String,
+    pub command: String,
     pub exit_code: Option<i64>,
     pub stdout: String,
     pub stderr: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 
+    /// The time when the job was started.
+    pub started_at: DbOption<DateTimeUtc>,
+
     #[sqlx(rename = "end_ts")]
     pub finished_at: DbOption<DateTimeUtc>,
+}
+
+impl JobRunDAO {
+    pub fn is_running(&self) -> bool {
+        self.started_at.0.is_some() && self.finished_at.0.is_none()
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.started_at.0.is_none()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished_at.0.is_some()
+    }
 }
 
 #[derive(FromRow)]
@@ -30,13 +48,23 @@ pub struct JobStatsDAO {
 
 /// db read/write operations for `job_runs` table
 impl DbConn {
-    pub async fn create_job_run(&self, job: String) -> Result<i32> {
+    pub async fn create_job_run(&self, job: String, command: String) -> Result<i64> {
         let rowid = query!(
-            r#"INSERT INTO job_runs (job, start_ts, stdout, stderr) VALUES (?, DATETIME('now'), '', '')"#,
-            job,
+            r#"INSERT INTO job_runs (job, start_ts, stdout, stderr, command) VALUES (?, DATETIME('now'), '', '', ?)"#,
+            job, command,
         ).execute(&self.pool).await?.last_insert_rowid();
 
-        Ok(rowid as i32)
+        Ok(rowid)
+    }
+
+    pub async fn get_next_job_to_execute(&self) -> Option<JobRunDAO> {
+        sqlx::query_as(
+            r#"SELECT * FROM job_runs WHERE exit_code IS NULL AND started_at is NULL ORDER BY created_at ASC LIMIT 1"#,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
     }
 
     pub async fn update_job_stdout(&self, job_id: i64, stdout: String) -> Result<()> {
@@ -64,6 +92,25 @@ impl DbConn {
             job_id,
         ).execute(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn update_job_started(&self, job_id: i64) -> Result<()> {
+        query!(
+            r#"UPDATE job_runs SET started_at = datetime('now'), updated_at = datetime('now') WHERE id = ?"#,
+            job_id,
+        ).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn get_latest_job_run(&self, command: String) -> Option<JobRunDAO> {
+        sqlx::query_as(
+            r#"SELECT * FROM job_runs WHERE command = ? ORDER BY created_at DESC LIMIT 1"#,
+        )
+        .bind(command)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
     }
 
     pub async fn list_job_runs_with_filter(
@@ -98,8 +145,10 @@ impl DbConn {
                 "exit_code",
                 "stdout",
                 "stderr",
+                "command"!,
                 "created_at"!,
                 "updated_at"!,
+                "started_at",
                 "end_ts" as "finished_at"
             ],
             limit,
@@ -139,7 +188,7 @@ impl DbConn {
     }
 
     pub async fn finalize_stale_job_runs(&self) -> Result<()> {
-        query!("UPDATE job_runs SET exit_code = -1, end_ts = datetime('now'), updated_at = datetime('now') WHERE exit_code IS NULL;")
+        query!("UPDATE job_runs SET exit_code = -1, started_at = datetime('now'), end_ts = datetime('now'), updated_at = datetime('now') WHERE exit_code IS NULL;")
             .execute(&self.pool)
             .await?;
         Ok(())

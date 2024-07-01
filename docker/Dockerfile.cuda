@@ -38,24 +38,32 @@ COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/root/workspace/target \
-    cargo build --features cuda,prod --release --package tabby && \
+    cargo build --no-default-features --features cuda,prod --release --package tabby && \
+    cp target/release/llama-server /opt/tabby/bin/ && \
     cp target/release/tabby /opt/tabby/bin/
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/root/workspace/target \
-    cargo build --features prod --release --package tabby && \
-    cp target/release/tabby /opt/tabby/bin/tabby-cpu
+# For compatibility with the legacy cpu build.
+RUN cp /opt/tabby/bin/tabby /opt/tabby/bin/tabby-cpu
 
 FROM ${BASE_CUDA_RUN_CONTAINER} as runtime
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        git \
+        git   \
+        curl  \
+        unzip \
         openssh-client \
         ca-certificates \
+        libgomp1 \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Install katana
+RUN curl -L https://github.com/projectdiscovery/katana/releases/download/v1.1.0/katana_1.1.0_linux_amd64.zip -o katana.zip \
+  && unzip katana.zip katana \
+  && mv katana /usr/bin/ \
+  && rm katana.zip
 
 # Disable safe directory in docker
 # Context: https://github.com/git/git/commit/8959555cee7ec045958f9b6dd62e541affb7e7d9

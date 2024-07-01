@@ -10,26 +10,26 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use juniper::ID;
 use tabby_db::{DbConn, InvitationDAO};
+use tabby_schema::{
+    auth::{
+        AuthenticationService, Invitation, JWTPayload, OAuthCredential, OAuthError, OAuthProvider,
+        OAuthResponse, RefreshTokenResponse, RegisterResponse, RequestInvitationInput,
+        TokenAuthResponse, UpdateOAuthCredentialInput, User,
+    },
+    email::EmailService,
+    is_demo_mode,
+    license::{LicenseInfo, LicenseService},
+    setting::SettingService,
+    AsID, AsRowid, CoreError, DbEnum, Result,
+};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use super::{dao::DbEnum, graphql_pagination_to_filter, AsID, AsRowid};
+use super::graphql_pagination_to_filter;
 use crate::{
     bail,
-    env::demo_mode,
-    oauth,
-    schema::{
-        auth::{
-            generate_jwt, validate_jwt, AuthenticationService, Invitation, JWTPayload,
-            OAuthCredential, OAuthError, OAuthProvider, OAuthResponse, RefreshTokenResponse,
-            RegisterResponse, RequestInvitationInput, TokenAuthResponse,
-            UpdateOAuthCredentialInput, User,
-        },
-        email::EmailService,
-        license::{LicenseInfo, LicenseService},
-        setting::SettingService,
-        CoreError, Result,
-    },
+    jwt::{generate_jwt, validate_jwt},
+    oauth::{self, OAuthClient},
 };
 
 #[derive(Clone)]
@@ -37,14 +37,21 @@ struct AuthenticationServiceImpl {
     db: DbConn,
     mail: Arc<dyn EmailService>,
     license: Arc<dyn LicenseService>,
+    setting: Arc<dyn SettingService>,
 }
 
-pub fn new_authentication_service(
+pub fn create(
     db: DbConn,
     mail: Arc<dyn EmailService>,
     license: Arc<dyn LicenseService>,
+    setting: Arc<dyn SettingService>,
 ) -> impl AuthenticationService {
-    AuthenticationServiceImpl { db, mail, license }
+    AuthenticationServiceImpl {
+        db,
+        mail,
+        license,
+        setting,
+    }
 }
 
 #[async_trait]
@@ -54,8 +61,12 @@ impl AuthenticationService for AuthenticationServiceImpl {
         email: String,
         password: String,
         invitation_code: Option<String>,
+        name: Option<String>,
     ) -> Result<RegisterResponse> {
         let is_admin_initialized = self.is_admin_initialized().await?;
+        if is_admin_initialized && is_demo_mode() {
+            bail!("Registering new users is disabled in demo mode");
+        }
         let invitation =
             check_invitation(&self.db, is_admin_initialized, invitation_code, &email).await?;
 
@@ -75,17 +86,23 @@ impl AuthenticationService for AuthenticationServiceImpl {
                     Some(pwd_hash),
                     !is_admin_initialized,
                     invitation.id,
+                    name.clone(),
                 )
                 .await?
         } else {
             self.db
-                .create_user(email.clone(), Some(pwd_hash), !is_admin_initialized)
+                .create_user(
+                    email.clone(),
+                    Some(pwd_hash),
+                    !is_admin_initialized,
+                    name.clone(),
+                )
                 .await?
         };
 
         let refresh_token = self.db.create_refresh_token(id).await?;
 
-        let Ok(access_token) = generate_jwt(JWTPayload::new(id.as_id())) else {
+        let Ok(access_token) = generate_jwt(id.as_id()) else {
             bail!("Unknown error");
         };
 
@@ -99,7 +116,7 @@ impl AuthenticationService for AuthenticationServiceImpl {
 
     async fn allow_self_signup(&self) -> Result<bool> {
         let domain_list = self
-            .db
+            .setting
             .read_security_setting()
             .await?
             .allowed_register_domain_list;
@@ -156,8 +173,8 @@ impl AuthenticationService for AuthenticationServiceImpl {
         old_password: Option<&str>,
         new_password: &str,
     ) -> Result<()> {
-        if demo_mode() {
-            bail!("Demo mode is enabled, cannot change passwords");
+        if is_demo_mode() {
+            bail!("Changing passwords is disabled in demo mode");
         }
 
         let user = self
@@ -194,6 +211,9 @@ impl AuthenticationService for AuthenticationServiceImpl {
     }
 
     async fn update_user_avatar(&self, id: &ID, avatar: Option<Box<[u8]>>) -> Result<()> {
+        if is_demo_mode() {
+            bail!("Changing profile data is disabled in demo mode");
+        }
         if avatar.as_ref().is_some_and(|v| v.len() > 512 * 1024) {
             bail!("The image you are attempting to upload is too large. Please ensure the file size is under 512KB");
         }
@@ -204,6 +224,15 @@ impl AuthenticationService for AuthenticationServiceImpl {
 
     async fn get_user_avatar(&self, id: &ID) -> Result<Option<Box<[u8]>>> {
         Ok(self.db.get_user_avatar(id.as_rowid()?).await?)
+    }
+
+    async fn update_user_name(&self, id: &ID, name: String) -> Result<()> {
+        if is_demo_mode() {
+            bail!("Changing profile data is disabled in demo mode");
+        }
+        let id = id.as_rowid()?;
+        self.db.update_user_name(id, name).await?;
+        Ok(())
     }
 
     async fn token_auth(&self, email: String, password: String) -> Result<TokenAuthResponse> {
@@ -224,7 +253,7 @@ impl AuthenticationService for AuthenticationServiceImpl {
 
         let refresh_token = self.db.create_refresh_token(user.id).await?;
 
-        let Ok(access_token) = generate_jwt(JWTPayload::new(user.id.as_id())) else {
+        let Ok(access_token) = generate_jwt(user.id.as_id()) else {
             bail!("Unknown error");
         };
 
@@ -253,23 +282,13 @@ impl AuthenticationService for AuthenticationServiceImpl {
             .await?;
 
         // refresh token update is done, generate new access token based on user info
-        let Ok(access_token) = generate_jwt(JWTPayload::new(user.id.as_id())) else {
+        let Ok(access_token) = generate_jwt(user.id.as_id()) else {
             bail!("Unknown error");
         };
 
         let resp = RefreshTokenResponse::new(access_token, new_token, *refresh_token.expires_at);
 
         Ok(resp)
-    }
-
-    async fn delete_expired_token(&self) -> Result<()> {
-        self.db.delete_expired_token().await?;
-        Ok(())
-    }
-
-    async fn delete_expired_password_resets(&self) -> Result<()> {
-        self.db.delete_expired_password_resets().await?;
-        Ok(())
     }
 
     async fn verify_access_token(&self, access_token: &str) -> Result<JWTPayload> {
@@ -322,6 +341,9 @@ impl AuthenticationService for AuthenticationServiceImpl {
     }
 
     async fn create_invitation(&self, email: String) -> Result<Invitation> {
+        if is_demo_mode() {
+            bail!("Inviting users is disabled in demo mode");
+        }
         let license = self.license.read().await?;
         license.ensure_available_seats(1)?;
 
@@ -341,7 +363,7 @@ impl AuthenticationService for AuthenticationServiceImpl {
 
     async fn request_invitation_email(&self, input: RequestInvitationInput) -> Result<Invitation> {
         if !self
-            .db
+            .setting
             .read_security_setting()
             .await?
             .can_register_without_invitation(&input.email)
@@ -405,24 +427,21 @@ impl AuthenticationService for AuthenticationServiceImpl {
         provider: OAuthProvider,
     ) -> std::result::Result<OAuthResponse, OAuthError> {
         let client = oauth::new_oauth_client(provider, Arc::new(self.clone()));
-        let email = client.fetch_user_email(code).await?;
         let license = self
             .license
             .read()
             .await
             .context("Failed to read license info")?;
-        let user_id = get_or_create_oauth_user(&license, &self.db, &self.mail, &email).await?;
 
-        let refresh_token = self.db.create_refresh_token(user_id).await?;
-
-        let access_token =
-            generate_jwt(JWTPayload::new(user_id.as_id())).map_err(|_| OAuthError::Unknown)?;
-
-        let resp = OAuthResponse {
-            access_token,
-            refresh_token,
-        };
-        Ok(resp)
+        oauth_login(
+            client,
+            code,
+            &self.db,
+            &*self.setting,
+            &license,
+            &*self.mail,
+        )
+        .await
     }
 
     async fn read_oauth_credential(
@@ -440,10 +459,11 @@ impl AuthenticationService for AuthenticationServiceImpl {
     }
 
     async fn oauth_callback_url(&self, provider: OAuthProvider) -> Result<String> {
-        let external_url = self.db.read_network_setting().await?.external_url;
+        let external_url = self.setting.read_network_setting().await?.external_url;
         let url = match provider {
             OAuthProvider::Github => external_url + "/oauth/callback/github",
             OAuthProvider::Google => external_url + "/oauth/callback/google",
+            OAuthProvider::Gitlab => external_url + "/oauth/callback/gitlab",
         };
         Ok(url)
     }
@@ -495,11 +515,37 @@ impl AuthenticationService for AuthenticationServiceImpl {
     }
 }
 
+async fn oauth_login(
+    client: Arc<dyn OAuthClient>,
+    code: String,
+    db: &DbConn,
+    setting: &dyn SettingService,
+    license: &LicenseInfo,
+    mail: &dyn EmailService,
+) -> Result<OAuthResponse, OAuthError> {
+    let access_token = client.exchange_code_for_token(code).await?;
+    let email = client.fetch_user_email(&access_token).await?;
+    let name = client.fetch_user_full_name(&access_token).await?;
+    let user_id = get_or_create_oauth_user(license, db, setting, mail, &email, &name).await?;
+
+    let refresh_token = db.create_refresh_token(user_id).await?;
+
+    let access_token = generate_jwt(user_id.as_id()).map_err(|_| OAuthError::Unknown)?;
+
+    let resp = OAuthResponse {
+        access_token,
+        refresh_token,
+    };
+    Ok(resp)
+}
+
 async fn get_or_create_oauth_user(
     license: &LicenseInfo,
     db: &DbConn,
-    mail: &Arc<dyn EmailService>,
+    setting: &dyn SettingService,
+    mail: &dyn EmailService,
     email: &str,
+    name: &str,
 ) -> Result<i64, OAuthError> {
     if let Some(user) = db.get_user_by_email(email).await? {
         return user
@@ -513,17 +559,23 @@ async fn get_or_create_oauth_user(
         return Err(OAuthError::InsufficientSeats);
     }
 
-    if db
+    let name = (!name.is_empty()).then_some(name.to_owned());
+
+    if setting
         .read_security_setting()
         .await
         .map_err(|x| OAuthError::Other(x.into()))?
         .can_register_without_invitation(email)
     {
+        if is_demo_mode() {
+            bail!("Registering new users is disabled in demo mode");
+        }
         // it's ok to set password to null here, because
         // 1. both `register` & `token_auth` mutation will do input validation, so empty password won't be accepted
         // 2. `password_verify` will always return false for empty password hash read from user table
         // so user created here is only able to login by github oauth, normal login won't work
-        let res = db.create_user(email.to_owned(), None, false).await?;
+
+        let res = db.create_user(email.to_owned(), None, false, name).await?;
         if let Err(e) = mail.send_signup(email.to_string()).await {
             warn!("Failed to send signup email: {e}");
         }
@@ -534,7 +586,7 @@ async fn get_or_create_oauth_user(
         };
         // safe to create with empty password for same reasons above
         let id = db
-            .create_user_with_invitation(email.to_owned(), None, false, invitation.id)
+            .create_user_with_invitation(email.to_owned(), None, false, invitation.id, name)
             .await?;
         let user = db.get_user(id).await?.unwrap();
         Ok(user.id)
@@ -624,7 +676,7 @@ mod tests {
     impl LicenseService for MockLicenseService {
         async fn read(&self) -> Result<LicenseInfo> {
             Ok(LicenseInfo {
-                r#type: crate::schema::license::LicenseType::Team,
+                r#type: tabby_schema::license::LicenseType::Team,
                 status: self.status.clone(),
                 seats: self.seats,
                 seats_used: self.seats_used,
@@ -648,6 +700,7 @@ mod tests {
         let db = DbConn::new_in_memory().await.unwrap();
         AuthenticationServiceImpl {
             db: db.clone(),
+            setting: Arc::new(crate::service::setting::create(db.clone())),
             mail: Arc::new(new_email_service(db).await.unwrap()),
             license,
         }
@@ -667,19 +720,23 @@ mod tests {
         let smtp = TestEmailServer::start().await;
         let service = AuthenticationServiceImpl {
             db: db.clone(),
-            mail: Arc::new(smtp.create_test_email_service(db).await),
+            mail: Arc::new(smtp.create_test_email_service(db.clone()).await),
             license: Arc::new(MockLicenseService::team()),
+            setting: Arc::new(crate::service::setting::create(db)),
         };
         (service, smtp)
     }
 
     use assert_matches::assert_matches;
     use serial_test::serial;
+    use tabby_schema::{
+        juniper::relay::{self, Connection},
+        license::{LicenseInfo, LicenseStatus, LicenseType},
+    };
 
     use super::*;
     use crate::{
-        juniper::relay::{self, Connection},
-        schema::license::{LicenseInfo, LicenseStatus},
+        oauth::test_client::TestOAuthClient,
         service::email::{new_email_service, testutils::TestEmailServer},
     };
 
@@ -706,7 +763,12 @@ mod tests {
 
     async fn register_admin_user(service: &AuthenticationServiceImpl) -> RegisterResponse {
         service
-            .register(ADMIN_EMAIL.to_owned(), ADMIN_PASSWORD.to_owned(), None)
+            .register(
+                ADMIN_EMAIL.to_owned(),
+                ADMIN_PASSWORD.to_owned(),
+                None,
+                None,
+            )
             .await
             .unwrap()
     }
@@ -761,7 +823,7 @@ mod tests {
         // Admin initialized, registeration requires a invitation code;
         assert_matches!(
             service
-                .register(email.to_owned(), password.to_owned(), None)
+                .register(email.to_owned(), password.to_owned(), None, None)
                 .await,
             Err(_)
         );
@@ -772,7 +834,8 @@ mod tests {
                 .register(
                     email.to_owned(),
                     password.to_owned(),
-                    Some("abc".to_owned())
+                    Some("abc".to_owned()),
+                    None
                 )
                 .await,
             Err(_)
@@ -784,6 +847,7 @@ mod tests {
                 email.to_owned(),
                 password.to_owned(),
                 Some(invitation.code.clone()),
+                None
             )
             .await
             .is_ok());
@@ -794,7 +858,8 @@ mod tests {
                 .register(
                     email.to_owned(),
                     password.to_owned(),
-                    Some(invitation.code.clone())
+                    Some(invitation.code.clone()),
+                    None
                 )
                 .await,
             Err(_)
@@ -902,16 +967,22 @@ mod tests {
         let license = service.license.read().await.unwrap();
         let id = service
             .db
-            .create_user("test@example.com".into(), None, false)
+            .create_user("test@example.com".into(), None, false, None)
             .await
             .unwrap();
         service.db.update_user_active(id, false).await.unwrap();
+        let setting = service.setting;
 
-        assert!(
-            get_or_create_oauth_user(&license, &service.db, &service.mail, "test@example.com")
-                .await
-                .is_err()
-        );
+        let res = get_or_create_oauth_user(
+            &license,
+            &service.db,
+            &*setting,
+            &*service.mail,
+            "test@example.com",
+            "",
+        )
+        .await;
+        assert_matches!(res, Err(OAuthError::UserDisabled));
 
         service
             .db
@@ -919,27 +990,55 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(get_or_create_oauth_user(
+        let res = get_or_create_oauth_user(
             &license,
             &service.db,
-            &service.mail,
-            "example@example.com"
+            &*setting,
+            &*service.mail,
+            "example@example.com",
+            "Example User",
         )
-        .await
-        .is_ok());
+        .await;
+        assert_matches!(res, Ok(2));
+
+        let user = service.db.get_user(2).await.unwrap().unwrap();
+        assert_eq!(user.email, "example@example.com");
+        assert_eq!(user.name, Some("Example User".into()));
 
         tokio::time::sleep(Duration::milliseconds(50).to_std().unwrap()).await;
-
         assert_eq!(mail.list_mail().await[0].subject, "Welcome to Tabby!");
 
-        assert!(get_or_create_oauth_user(
+        let res = get_or_create_oauth_user(
             &license,
             &service.db,
-            &service.mail,
-            "example@gmail.com"
+            &*setting,
+            &*service.mail,
+            "example@gmail.com",
+            "",
         )
-        .await
-        .is_err());
+        .await;
+        assert_matches!(res, Err(OAuthError::UserNotInvited));
+
+        service
+            .db
+            .create_invitation("example@gmail.com".into())
+            .await
+            .unwrap();
+
+        let res = get_or_create_oauth_user(
+            &license,
+            &service.db,
+            &*setting,
+            &*service.mail,
+            "example@gmail.com",
+            "User 3 by Invitation",
+        )
+        .await;
+        assert_matches!(res, Ok(3));
+
+        let user = service.db.get_user(3).await.unwrap().unwrap();
+        assert_eq!(user.email, "example@gmail.com");
+        assert_eq!(user.name, Some("User 3 by Invitation".into()));
     }
 
     #[tokio::test]
@@ -953,7 +1052,7 @@ mod tests {
             .unwrap();
 
         service
-            .register("test@example.com".into(), "".into(), Some(code.code))
+            .register("test@example.com".into(), "".into(), Some(code.code), None)
             .await
             .unwrap();
 
@@ -967,13 +1066,13 @@ mod tests {
         let service = test_authentication_service().await;
         let _ = service
             .db
-            .create_user("admin@example.com".into(), None, true)
+            .create_user("admin@example.com".into(), None, true, None)
             .await
             .unwrap();
 
         let user_id = service
             .db
-            .create_user("user@example.com".into(), None, false)
+            .create_user("user@example.com".into(), None, false, None)
             .await
             .unwrap();
 
@@ -998,7 +1097,7 @@ mod tests {
         let service = test_authentication_service().await;
         let admin_id = service
             .db
-            .create_user("admin@example.com".into(), None, true)
+            .create_user("admin@example.com".into(), None, true, None)
             .await
             .unwrap();
 
@@ -1021,7 +1120,7 @@ mod tests {
         // Test first reset, ensure wrong code fails
         service
             .db
-            .create_user("user@example.com".into(), Some("pass".into()), true)
+            .create_user("user@example.com".into(), Some("pass".into()), true, None)
             .await
             .unwrap();
         let user = service.get_user_by_email("user@example.com").await.unwrap();
@@ -1080,7 +1179,7 @@ mod tests {
         // Test third reset, ensure inactive users cannot reset their password
         let user_id_2 = service
             .db
-            .create_user("user2@example.com".into(), Some("pass".into()), false)
+            .create_user("user2@example.com".into(), Some("pass".into()), false, None)
             .await
             .unwrap();
 
@@ -1105,19 +1204,6 @@ mod tests {
             .password_reset(&reset.code, "newpass")
             .await
             .is_err());
-
-        service
-            .db
-            .mark_password_reset_expired(&reset.code)
-            .await
-            .unwrap();
-        service.delete_expired_password_resets().await.unwrap();
-        assert!(service
-            .db
-            .get_password_reset_by_code(&reset.code)
-            .await
-            .unwrap()
-            .is_none());
     }
 
     #[tokio::test]
@@ -1125,17 +1211,17 @@ mod tests {
         let service = test_authentication_service().await;
         service
             .db
-            .create_user("a@example.com".into(), Some("pass".into()), false)
+            .create_user("a@example.com".into(), Some("pass".into()), false, None)
             .await
             .unwrap();
         service
             .db
-            .create_user("b@example.com".into(), Some("pass".into()), false)
+            .create_user("b@example.com".into(), Some("pass".into()), false, None)
             .await
             .unwrap();
         service
             .db
-            .create_user("c@example.com".into(), Some("pass".into()), false)
+            .create_user("c@example.com".into(), Some("pass".into()), false, None)
             .await
             .unwrap();
 
@@ -1252,23 +1338,23 @@ mod tests {
 
         // Create owner user.
         service
-            .register("a@example.com".into(), "pass".into(), None)
+            .register("a@example.com".into(), "pass".into(), None, None)
             .await
             .unwrap();
 
         let user1 = service
             .db
-            .create_user("b@example.com".into(), Some("pass".into()), false)
+            .create_user("b@example.com".into(), Some("pass".into()), false, None)
             .await
             .unwrap();
         let user2 = service
             .db
-            .create_user("c@example.com".into(), Some("pass".into()), false)
+            .create_user("c@example.com".into(), Some("pass".into()), false, None)
             .await
             .unwrap();
         let user3 = service
             .db
-            .create_user("d@example.com".into(), Some("pass".into()), false)
+            .create_user("d@example.com".into(), Some("pass".into()), false, None)
             .await
             .unwrap();
 
@@ -1309,7 +1395,7 @@ mod tests {
         let service = test_authentication_service().await;
         let id = service
             .db
-            .create_user("test@example.com".into(), None, true)
+            .create_user("test@example.com".into(), None, true, None)
             .await
             .unwrap();
 
@@ -1336,7 +1422,12 @@ mod tests {
         let (service, _mail) = test_authentication_service_with_mail().await;
         let id = service
             .db
-            .create_user("test@example.com".into(), password_hash("pass").ok(), true)
+            .create_user(
+                "test@example.com".into(),
+                password_hash("pass").ok(),
+                true,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1364,7 +1455,12 @@ mod tests {
 
         let id = service
             .db
-            .create_user("test@example.com".into(), password_hash("pass").ok(), true)
+            .create_user(
+                "test@example.com".into(),
+                password_hash("pass").ok(),
+                true,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1398,5 +1494,60 @@ mod tests {
         assert_eq!(cred.provider, OAuthProvider::Google);
         assert_eq!(cred.client_id, "id");
         assert_eq!(cred.client_secret, "secret");
+    }
+
+    #[tokio::test]
+    async fn test_oauth_login() {
+        let service = test_authentication_service().await;
+        let license = LicenseInfo {
+            r#type: LicenseType::Enterprise,
+            status: LicenseStatus::Ok,
+            seats: 1000,
+            seats_used: 0,
+            issued_at: None,
+            expires_at: None,
+        };
+
+        let client = Arc::new(TestOAuthClient {
+            access_token_response: || Ok("faketoken".into()),
+            user_email: "user@example.com".into(),
+            user_name: "user".into(),
+        });
+
+        service
+            .create_invitation("user@example.com".into())
+            .await
+            .unwrap();
+
+        let response = oauth_login(
+            client,
+            "fakecode".into(),
+            &service.db,
+            &*service.setting,
+            &license,
+            &*service.mail,
+        )
+        .await
+        .unwrap();
+
+        assert!(!response.access_token.is_empty());
+
+        let client = Arc::new(TestOAuthClient {
+            access_token_response: || Err(anyhow!("bad auth")),
+            user_email: "user@example.com".into(),
+            user_name: "user".into(),
+        });
+
+        let response = oauth_login(
+            client,
+            "fakecode".into(),
+            &service.db,
+            &*service.setting,
+            &license,
+            &*service.mail,
+        )
+        .await;
+
+        assert!(response.is_err());
     }
 }

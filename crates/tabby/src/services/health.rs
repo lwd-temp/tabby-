@@ -4,6 +4,7 @@ use anyhow::Result;
 use nvml_wrapper::Nvml;
 use serde::{Deserialize, Serialize};
 use sysinfo::{CpuExt, System, SystemExt};
+use tabby_common::config::{ModelConfig, ModelConfigGroup};
 use utoipa::ToSchema;
 
 use crate::Device;
@@ -14,6 +15,8 @@ pub struct HealthState {
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_device: Option<String>,
     device: String,
     arch: String,
     cpu_info: String,
@@ -25,9 +28,9 @@ pub struct HealthState {
 
 impl HealthState {
     pub fn new(
-        model: Option<&str>,
-        chat_model: Option<&str>,
+        model_config: &ModelConfigGroup,
         device: &Device,
+        chat_device: Option<&Device>,
         webserver: Option<bool>,
     ) -> Self {
         let (cpu_info, cpu_count) = read_cpu_info();
@@ -38,8 +41,9 @@ impl HealthState {
         };
 
         Self {
-            model: model.map(|x| x.to_owned()),
-            chat_model: chat_model.map(|x| x.to_owned()),
+            model: to_model_name(&model_config.completion),
+            chat_model: to_model_name(&model_config.chat),
+            chat_device: chat_device.map(|x| x.to_string()),
             device: device.to_string(),
             arch: ARCH.to_string(),
             cpu_info,
@@ -48,6 +52,17 @@ impl HealthState {
             version: Version::new(),
             webserver,
         }
+    }
+}
+
+fn to_model_name(model: &Option<ModelConfig>) -> Option<String> {
+    if let Some(model) = model {
+        match model {
+            ModelConfig::Http(_http) => Some("Remote".to_owned()),
+            ModelConfig::Local(llama) => Some(llama.model_id.clone()),
+        }
+    } else {
+        None
     }
 }
 

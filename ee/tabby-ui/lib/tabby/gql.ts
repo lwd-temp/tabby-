@@ -17,23 +17,12 @@ import {
 
 import {
   GitRepositoriesQueryVariables,
-  ListGithubRepositoriesQueryVariables,
-  ListGitlabRepositoriesQueryVariables,
-  ListInvitationsQueryVariables
+  ListInvitationsQueryVariables,
+  WebCrawlerUrlsQueryVariables
 } from '../gql/generates/graphql'
 import { refreshTokenMutation } from './auth'
-import {
-  listGithubRepositories,
-  listGitlabRepositories,
-  listInvitations,
-  listRepositories
-} from './query'
-import {
-  clearAuthToken,
-  getAuthToken,
-  isTokenExpired,
-  tokenManagerInstance
-} from './token-management'
+import { listInvitations, listRepositories, listWebCrawlerUrl } from './query'
+import { getAuthToken, isTokenExpired, tokenManager } from './token-management'
 
 interface ValidationError {
   path: string
@@ -111,9 +100,8 @@ const client = new Client({
       resolvers: {
         Query: {
           invitations: relayPagination(),
-          repositories: relayPagination(),
-          githubRepositories: relayPagination(),
-          gitlabRepositories: relayPagination()
+          gitRepositories: relayPagination(),
+          webCrawlerUrls: relayPagination()
         }
       },
       updates: {
@@ -167,67 +155,23 @@ const client = new Client({
                 })
             }
           },
-          updateGithubProvidedRepositoryActive(result, args, cache, info) {
-            if (result.updateGithubProvidedRepositoryActive) {
+          deleteWebCrawlerUrl(result, args, cache, info) {
+            if (result.deleteWebCrawlerUrl) {
               cache
                 .inspectFields('Query')
-                .filter(field => field.fieldName === 'githubRepositories')
+                .filter(field => field.fieldName === 'webCrawlerUrls')
                 .forEach(field => {
                   cache.updateQuery(
                     {
-                      query: listGithubRepositories,
-                      variables:
-                        field.arguments as ListGithubRepositoriesQueryVariables
+                      query: listWebCrawlerUrl,
+                      variables: field.arguments as WebCrawlerUrlsQueryVariables
                     },
                     data => {
-                      if (data?.githubRepositories?.edges?.length) {
-                        data.githubRepositories.edges =
-                          data.githubRepositories.edges.map(edge => {
-                            if (edge.node.id === args.id) {
-                              return {
-                                ...edge,
-                                node: {
-                                  ...edge.node,
-                                  active: args.active as boolean
-                                }
-                              }
-                            }
-                            return edge
-                          })
-                      }
-                      return data
-                    }
-                  )
-                })
-            }
-          },
-          updateGitlabProvidedRepositoryActive(result, args, cache, info) {
-            if (result.updateGitlabProvidedRepositoryActive) {
-              cache
-                .inspectFields('Query')
-                .filter(field => field.fieldName === 'gitlabRepositories')
-                .forEach(field => {
-                  cache.updateQuery(
-                    {
-                      query: listGitlabRepositories,
-                      variables:
-                        field.arguments as ListGitlabRepositoriesQueryVariables
-                    },
-                    data => {
-                      if (data?.gitlabRepositories?.edges?.length) {
-                        data.gitlabRepositories.edges =
-                          data.gitlabRepositories.edges.map(edge => {
-                            if (edge.node.id === args.id) {
-                              return {
-                                ...edge,
-                                node: {
-                                  ...edge.node,
-                                  active: args.active as boolean
-                                }
-                              }
-                            }
-                            return edge
-                          })
+                      if (data?.webCrawlerUrls?.edges) {
+                        data.webCrawlerUrls.edges =
+                          data.webCrawlerUrls.edges.filter(
+                            e => e.node.id !== args.id
+                          )
                       }
                       return data
                     }
@@ -255,9 +199,14 @@ const client = new Client({
           })
         },
         didAuthError(error, _operation) {
-          return error.graphQLErrors.some(
+          const isUnauthorized = error.graphQLErrors.some(
             e => e?.extensions?.code === 'UNAUTHORIZED'
           )
+          if (isUnauthorized) {
+            tokenManager.clearAccessToken()
+          }
+
+          return isUnauthorized
         },
         willAuthError(operation) {
           // Sync tokens on every operation
@@ -266,12 +215,25 @@ const client = new Client({
           refreshToken = authData?.refreshToken
 
           if (
+            operation.kind === 'query' &&
+            operation.query.definitions.some(definition => {
+              return (
+                definition.kind === 'OperationDefinition' &&
+                definition.name?.value &&
+                ['GetServerInfo'].includes(definition.name.value)
+              )
+            })
+          ) {
+            return false
+          }
+
+          if (
             operation.kind === 'mutation' &&
             operation.query.definitions.some(definition => {
               return (
                 definition.kind === 'OperationDefinition' &&
                 definition.name?.value &&
-                ['tokenAuth', 'registerUser'].includes(definition.name.value)
+                ['tokenAuth', 'register'].includes(definition.name.value)
               )
             })
           ) {
@@ -292,30 +254,29 @@ const client = new Client({
           }
 
           if (accessToken) {
-            // Check whether `token` JWT is expired
             try {
               const { exp } = jwtDecode(accessToken)
-              return exp ? isTokenExpired(exp) : true
+              // Check whether `token` JWT is expired
+              return isTokenExpired(exp)
             } catch (e) {
               return true
             }
           } else {
+            tokenManager.clearAccessToken()
             return true
           }
         },
         async refreshAuth() {
-          if (refreshToken) {
-            return tokenManagerInstance.refreshToken(() =>
-              utils
-                .mutate(refreshTokenMutation, {
-                  refreshToken: refreshToken as string
-                })
-                .then(res => res?.data?.refreshToken)
-            )
-          } else {
-            // This is where auth has gone wrong and we need to clean up and redirect to a login page
-            clearAuthToken()
-          }
+          return tokenManager.refreshToken(async () => {
+            const refreshToken = getAuthToken()?.refreshToken
+            if (!refreshToken) return undefined
+
+            return utils
+              .mutate(refreshTokenMutation, {
+                refreshToken
+              })
+              .then(res => res?.data?.refreshToken)
+          })
         }
       }
     }),

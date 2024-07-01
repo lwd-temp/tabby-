@@ -26,9 +26,10 @@ import { EditChatTitleDialog } from './edit-chat-title-dialog'
 
 interface ChatSessionsProps {
   className?: string
+  style?: Record<string, string>
 }
 
-export const ChatSessions = ({ className }: ChatSessionsProps) => {
+export const ChatSessions = ({ className, style }: ChatSessionsProps) => {
   const _hasHydrated = useStore(useChatStore, state => state._hasHydrated)
   const chats = useStore(useChatStore, state => state.chats)
   const activeChatId = useStore(useChatStore, state => state.activeChatId)
@@ -50,8 +51,11 @@ export const ChatSessions = ({ className }: ChatSessionsProps) => {
 
   return (
     <>
-      <div className={cn(className)}>
-        <div className="fixed inset-y-0 left-0 flex w-[279px] flex-col gap-2">
+      <div className={className}>
+        <div
+          className="flex w-[279px] flex-col gap-2 transition-all"
+          style={style}
+        >
           <div className="shrink-0 pb-0 pl-3 pt-2">
             <Button
               className="h-12 w-full justify-start"

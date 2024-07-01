@@ -45,6 +45,16 @@ export const listRepositories = graphql(/* GraphQL */ `
           id
           name
           gitUrl
+          jobInfo {
+            lastJobRun {
+              id
+              job
+              createdAt
+              finishedAt
+              exitCode
+            }
+            command
+          }
         }
         cursor
       }
@@ -80,6 +90,7 @@ export const listJobRuns = graphql(/* GraphQL */ `
           id
           job
           createdAt
+          startedAt
           finishedAt
           exitCode
           stdout
@@ -124,6 +135,7 @@ export const listUsers = graphql(/* GraphQL */ `
           isOwner
           createdAt
           active
+          name
         }
         cursor
       }
@@ -151,8 +163,8 @@ export const queryDailyStatsInPastYear = graphql(/* GraphQL */ `
 
 export const queryDailyStats = graphql(/* GraphQL */ `
   query DailyStats(
-    $start: DateTimeUtc!
-    $end: DateTimeUtc!
+    $start: DateTime!
+    $end: DateTime!
     $users: [ID!]
     $languages: [Language!]
   ) {
@@ -167,16 +179,18 @@ export const queryDailyStats = graphql(/* GraphQL */ `
   }
 `)
 
-export const listGithubRepositoryProviders = graphql(/* GraphQL */ `
-  query ListGithubRepositoryProviders(
+export const listIntegrations = graphql(/* GraphQL */ `
+  query ListIntegrations(
     $ids: [ID!]
+    $kind: IntegrationKind
     $after: String
     $before: String
     $first: Int
     $last: Int
   ) {
-    githubRepositoryProviders(
+    integrations(
       ids: $ids
+      kind: $kind
       after: $after
       before: $before
       first: $first
@@ -187,6 +201,7 @@ export const listGithubRepositoryProviders = graphql(/* GraphQL */ `
           id
           displayName
           status
+          apiBase
         }
         cursor
       }
@@ -200,52 +215,20 @@ export const listGithubRepositoryProviders = graphql(/* GraphQL */ `
   }
 `)
 
-export const listGithubRepositories = graphql(/* GraphQL */ `
-  query ListGithubRepositories(
-    $providerIds: [ID!]!
-    $after: String
-    $before: String
-    $first: Int
-    $last: Int
-  ) {
-    githubRepositories(
-      providerIds: $providerIds
-      after: $after
-      before: $before
-      first: $first
-      last: $last
-    ) {
-      edges {
-        node {
-          id
-          vendorId
-          githubRepositoryProviderId
-          name
-          gitUrl
-          active
-        }
-        cursor
-      }
-      pageInfo {
-        hasNextPage
-        hasPreviousPage
-        startCursor
-        endCursor
-      }
-    }
-  }
-`)
-
-export const listGitlabRepositoryProviders = graphql(/* GraphQL */ `
-  query ListGitlabRepositoryProviders(
+export const listIntegratedRepositories = graphql(/* GraphQL */ `
+  query ListIntegratedRepositories(
     $ids: [ID!]
+    $kind: IntegrationKind
+    $active: Boolean
     $after: String
     $before: String
     $first: Int
     $last: Int
   ) {
-    gitlabRepositoryProviders(
+    integratedRepositories(
       ids: $ids
+      kind: $kind
+      active: $active
       after: $after
       before: $before
       first: $first
@@ -255,7 +238,19 @@ export const listGitlabRepositoryProviders = graphql(/* GraphQL */ `
         node {
           id
           displayName
-          status
+          gitUrl
+          active
+          jobInfo {
+            lastJobRun {
+              id
+              job
+              createdAt
+              finishedAt
+              startedAt
+              exitCode
+            }
+            command
+          }
         }
         cursor
       }
@@ -269,29 +264,29 @@ export const listGitlabRepositoryProviders = graphql(/* GraphQL */ `
   }
 `)
 
-export const listGitlabRepositories = graphql(/* GraphQL */ `
-  query ListGitlabRepositories(
-    $providerIds: [ID!]!
+export const listWebCrawlerUrl = graphql(/* GraphQL */ `
+  query WebCrawlerUrls(
     $after: String
     $before: String
     $first: Int
     $last: Int
   ) {
-    gitlabRepositories(
-      providerIds: $providerIds
-      after: $after
-      before: $before
-      first: $first
-      last: $last
-    ) {
+    webCrawlerUrls(after: $after, before: $before, first: $first, last: $last) {
       edges {
         node {
+          url
           id
-          vendorId
-          gitlabRepositoryProviderId
-          name
-          gitUrl
-          active
+          createdAt
+          jobInfo {
+            lastJobRun {
+              id
+              job
+              createdAt
+              finishedAt
+              exitCode
+            }
+            command
+          }
         }
         cursor
       }

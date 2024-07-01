@@ -2,7 +2,21 @@
 
 import * as React from 'react'
 // FIXME(wwayne): Review each icons and consider re-export from `lucide-react`.
-import { BookOpenText, ChevronsDownUp, Mail } from 'lucide-react'
+import {
+  Blocks,
+  BookOpenText,
+  Box,
+  ChevronsDownUp,
+  CirclePlay,
+  FileText,
+  GitFork,
+  Layers2,
+  Mail,
+  Search,
+  Sparkles,
+  Star,
+  Tag
+} from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 
@@ -561,44 +575,44 @@ function IconSlack({ className, ...props }: React.ComponentProps<'svg'>) {
       <g>
         <g>
           <path
-            style={{ fill: '#E01E5A' }}
+            style={{ fill: props.fill || '#E01E5A' }}
             d="M99.4,151.2c0,7.1-5.8,12.9-12.9,12.9c-7.1,0-12.9-5.8-12.9-12.9c0-7.1,5.8-12.9,12.9-12.9h12.9V151.2z"
           />
           <path
-            style={{ fill: '#E01E5A' }}
+            style={{ fill: props.fill || '#E01E5A' }}
             d="M105.9,151.2c0-7.1,5.8-12.9,12.9-12.9s12.9,5.8,12.9,12.9v32.3c0,7.1-5.8,12.9-12.9,12.9
         s-12.9-5.8-12.9-12.9V151.2z"
           />
         </g>
         <g>
           <path
-            style={{ fill: '#36C5F0' }}
+            style={{ fill: props.fill || '#36C5F0' }}
             d="M118.8,99.4c-7.1,0-12.9-5.8-12.9-12.9c0-7.1,5.8-12.9,12.9-12.9s12.9,5.8,12.9,12.9v12.9H118.8z"
           />
           <path
-            style={{ fill: '#36C5F0' }}
+            style={{ fill: props.fill || '#36C5F0' }}
             d="M118.8,105.9c7.1,0,12.9,5.8,12.9,12.9s-5.8,12.9-12.9,12.9H86.5c-7.1,0-12.9-5.8-12.9-12.9
         s5.8-12.9,12.9-12.9H118.8z"
           />
         </g>
         <g>
           <path
-            style={{ fill: '#2EB67D' }}
+            style={{ fill: props.fill || '#2EB67D' }}
             d="M170.6,118.8c0-7.1,5.8-12.9,12.9-12.9c7.1,0,12.9,5.8,12.9,12.9s-5.8,12.9-12.9,12.9h-12.9V118.8z"
           />
           <path
-            style={{ fill: '#2EB67D' }}
+            style={{ fill: props.fill || '#2EB67D' }}
             d="M164.1,118.8c0,7.1-5.8,12.9-12.9,12.9c-7.1,0-12.9-5.8-12.9-12.9V86.5c0-7.1,5.8-12.9,12.9-12.9
         c7.1,0,12.9,5.8,12.9,12.9V118.8z"
           />
         </g>
         <g>
           <path
-            style={{ fill: '#ECB22E' }}
+            style={{ fill: props.fill || '#ECB22E' }}
             d="M151.2,170.6c7.1,0,12.9,5.8,12.9,12.9c0,7.1-5.8,12.9-12.9,12.9c-7.1,0-12.9-5.8-12.9-12.9v-12.9H151.2z"
           />
           <path
-            style={{ fill: '#ECB22E' }}
+            style={{ fill: props.fill || '#ECB22E' }}
             d="M151.2,164.1c-7.1,0-12.9-5.8-12.9-12.9c0-7.1,5.8-12.9,12.9-12.9h32.3c7.1,0,12.9,5.8,12.9,12.9
         c0,7.1-5.8,12.9-12.9,12.9H151.2z"
           />
@@ -1400,6 +1414,143 @@ function IconChevronsDownUp({
   )
 }
 
+const IconStar = ({
+  className,
+  ...props
+}: React.ComponentProps<typeof Star>) => (
+  <Star className={cn('h4 w-4', className)} {...props} />
+)
+
+const IconGitFork = ({
+  className,
+  ...props
+}: React.ComponentProps<typeof GitFork>) => (
+  <GitFork className={cn('h4 w-4', className)} {...props} />
+)
+
+function IconBlocks({
+  className,
+  ...props
+}: React.ComponentProps<typeof Blocks>) {
+  return <Blocks className={cn('h4 w-4', className)} {...props} />
+}
+
+function IconVSCode({ className, ...props }: React.ComponentProps<'svg'>) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      className={cn('h-4 w-4', className)}
+      viewBox="0 0 1024 1024"
+      fill="currentColor"
+      {...props}
+    >
+      <path d="M746.222933 102.239573l-359.799466 330.820267L185.347413 281.4976 102.2464 329.864533l198.20544 182.132054-198.20544 182.132053 83.101013 48.510293 201.076054-151.558826 359.799466 330.676906 175.527254-85.251413V187.4944z m0 217.57952v384.341334l-255.040853-192.177494z" />
+    </svg>
+  )
+}
+
+function IconJetBrains({ className, ...props }: React.ComponentProps<'svg'>) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      className={cn('h-4 w-4', className)}
+      viewBox="0 0 1024 1024"
+      fill="currentColor"
+      {...props}
+    >
+      <path d="M64 960h896V64H64z" />
+      <path
+        d="M161.51 848.32h336V792h-336zM197.4 318.72a53 53 0 0 0 38.4-14.08 51.76 51.76 0 0 0 12.8-39V176h-38.4v89.6c0 12.8-6.4 19.2-16 19.2-9-0.64-17.28-5.12-21.76-12.8l-25 23.68a57.67 57.67 0 0 0 49.96 23.04zM303.36 230.4v-21.76h74.88V176H265.6v139.52h113.28v-33.28h-74.24v-22.4h65.92V230.4zM433.09 316.16h39V209.92h42.24V176H391.49v33.92h41.6zM228.88 371.22a55.87 55.87 0 0 1 38.4 12.8 32 32 0 0 1 9 22.4c0 14.08-8.32 26.88-21.76 31.36 16.64 3.2 28.16 17.28 27.52 33.92 0 24.28-19.2 39-52.48 39H163V371.22zM220 402.54h-19.2v24.32h18.56c11.381 0 18.39-3.748 18.557-11.861l0.003-0.299c-0.01-7.7-6.41-12.16-17.92-12.16z m-19.2 51.67v25.6h24.32c11.52 0 18.56-4.48 18.56-12.8 0-7-6.4-12.8-19.2-12.8h-23.69 0.01zM356.91 371.19a64.87 64.87 0 0 1 44.8 15.36c8.96 8.32 13.44 19.84 13.44 32.64 0.64 18.56-11.52 35.81-28.8 42.88l33.28 48.64h-44.8l-28.16-42.24h-12.8v42.24h-38.4V371.19z m-1.6 34.04h-21.76v33.92l21.76-0.64c12.8 0 20.48-6.4 20.48-16.64 0-10.88-7.68-16.64-20.48-16.64z"
+        fill="#FFFFFF"
+      />
+      <path
+        d="M505.9 370.13l59.52 140.8h-41.6l-9.6-25h-54.4l-10.24 25h-40.32l59.52-140.8h37.12z m-18.22 46l-16 39.68h30.72l-14.72-39.68zM571.14 511h39V370.88h-39zM715.78 511h33.92V370.88h-38.4v74.88l-50.56-74.88H624.9V511h38.4v-76.8zM816.47 401.36c14.08 0 27.52 5.12 39 13.44l18.56-27.52a88.83 88.83 0 0 0-57.6-18.56c-33.28 0-53.76 19.2-53.76 44.8 0 28.8 22.4 37.12 52.48 43.52 19.2 5.12 23.68 7.68 23.68 14.08 0 5.76-5.76 9.6-16 9.6-16.64-0.64-32.64-6.4-44.8-16.64l-21.76 25.6c18.56 14.72 41.6 23 64.64 22.4 34.56 0 57-16.64 57-44.8 0-26.24-19.2-36.48-51.2-43.52-19.84-4.48-24.32-7-24.32-13.44 0-5.12 4.48-8.96 14.08-8.96z"
+        fill="#FFFFFF"
+      />
+    </svg>
+  )
+}
+
+function IconLayers({
+  className,
+  ...props
+}: React.ComponentProps<typeof Layers2>) {
+  return <Layers2 className={cn('h4 w-4', className)} {...props} />
+}
+
+function IconSparkles({
+  className,
+  ...props
+}: React.ComponentProps<typeof Sparkles>) {
+  return <Sparkles className={cn('h4 w-4', className)} {...props} />
+}
+
+function IconSearch({
+  className,
+  ...props
+}: React.ComponentProps<typeof Search>) {
+  return <Search className={cn('h4 w-4', className)} {...props} />
+}
+
+function IconCirclePlay({
+  className,
+  ...props
+}: React.ComponentProps<typeof CirclePlay>) {
+  return <CirclePlay className={cn('h-4 w-4', className)} {...props} />
+}
+
+function IconBox({ className, ...props }: React.ComponentProps<typeof Box>) {
+  return <Box className={cn('h4 w-4', className)} {...props} />
+}
+
+function IconTag({ className, ...props }: React.ComponentProps<typeof Tag>) {
+  return <Tag className={cn('h4 w-4', className)} {...props} />
+}
+
+function IconFileText({
+  className,
+  ...props
+}: React.ComponentProps<typeof FileText>) {
+  return <FileText className={cn('h-4 w-4', className)} {...props} />
+}
+
+function IconGlobal({ className, ...props }: React.ComponentProps<'svg'>) {
+  return (
+    <svg
+      viewBox="0 0 15 15"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={cn('h4 w-4', className)}
+      {...props}
+    >
+      <path
+        d="M7.49996 1.80002C4.35194 1.80002 1.79996 4.352 1.79996 7.50002C1.79996 10.648 4.35194 13.2 7.49996 13.2C10.648 13.2 13.2 10.648 13.2 7.50002C13.2 4.352 10.648 1.80002 7.49996 1.80002ZM0.899963 7.50002C0.899963 3.85494 3.85488 0.900024 7.49996 0.900024C11.145 0.900024 14.1 3.85494 14.1 7.50002C14.1 11.1451 11.145 14.1 7.49996 14.1C3.85488 14.1 0.899963 11.1451 0.899963 7.50002Z"
+        fill="currentColor"
+        fill-rule="evenodd"
+        clip-rule="evenodd"
+      ></path>
+      <path
+        d="M13.4999 7.89998H1.49994V7.09998H13.4999V7.89998Z"
+        fill="currentColor"
+        fill-rule="evenodd"
+        clip-rule="evenodd"
+      ></path>
+      <path
+        d="M7.09991 13.5V1.5H7.89991V13.5H7.09991zM10.375 7.49998C10.375 5.32724 9.59364 3.17778 8.06183 1.75656L8.53793 1.24341C10.2396 2.82218 11.075 5.17273 11.075 7.49998 11.075 9.82724 10.2396 12.1778 8.53793 13.7566L8.06183 13.2434C9.59364 11.8222 10.375 9.67273 10.375 7.49998zM3.99969 7.5C3.99969 5.17611 4.80786 2.82678 6.45768 1.24719L6.94177 1.75281C5.4582 3.17323 4.69969 5.32389 4.69969 7.5 4.6997 9.67611 5.45822 11.8268 6.94179 13.2472L6.45769 13.7528C4.80788 12.1732 3.9997 9.8239 3.99969 7.5z"
+        fill="currentColor"
+        fill-rule="evenodd"
+        clip-rule="evenodd"
+      ></path>
+      <path
+        d="M7.49996 3.95801C9.66928 3.95801 11.8753 4.35915 13.3706 5.19448 13.5394 5.28875 13.5998 5.50197 13.5055 5.67073 13.4113 5.83948 13.198 5.89987 13.0293 5.8056 11.6794 5.05155 9.60799 4.65801 7.49996 4.65801 5.39192 4.65801 3.32052 5.05155 1.97064 5.8056 1.80188 5.89987 1.58866 5.83948 1.49439 5.67073 1.40013 5.50197 1.46051 5.28875 1.62927 5.19448 3.12466 4.35915 5.33063 3.95801 7.49996 3.95801zM7.49996 10.85C9.66928 10.85 11.8753 10.4488 13.3706 9.6135 13.5394 9.51924 13.5998 9.30601 13.5055 9.13726 13.4113 8.9685 13.198 8.90812 13.0293 9.00238 11.6794 9.75643 9.60799 10.15 7.49996 10.15 5.39192 10.15 3.32052 9.75643 1.97064 9.00239 1.80188 8.90812 1.58866 8.9685 1.49439 9.13726 1.40013 9.30601 1.46051 9.51924 1.62927 9.6135 3.12466 10.4488 5.33063 10.85 7.49996 10.85z"
+        fill="currentColor"
+        fill-rule="evenodd"
+        clip-rule="evenodd"
+      ></path>
+    </svg>
+  )
+}
+
 export {
   IconEdit,
   IconNextChat,
@@ -1471,5 +1622,18 @@ export {
   IconActivity,
   IconBookOpenText,
   IconMail,
-  IconChevronsDownUp
+  IconChevronsDownUp,
+  IconStar,
+  IconGitFork,
+  IconBlocks,
+  IconVSCode,
+  IconJetBrains,
+  IconLayers,
+  IconSparkles,
+  IconSearch,
+  IconCirclePlay,
+  IconBox,
+  IconTag,
+  IconGlobal,
+  IconFileText
 }

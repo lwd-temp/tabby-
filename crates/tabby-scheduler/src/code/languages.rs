@@ -20,7 +20,7 @@ lazy_static! {
                 TagsConfigurationSync(
                     TagsConfiguration::new(
                         tree_sitter_python::language(),
-                        tree_sitter_python::TAGGING_QUERY,
+                        tree_sitter_python::TAGS_QUERY,
                         "",
                     )
                     .unwrap(),
@@ -42,7 +42,7 @@ lazy_static! {
                 TagsConfigurationSync(
                     TagsConfiguration::new(
                         tree_sitter_java::language(),
-                        tree_sitter_java::TAGGING_QUERY,
+                        tree_sitter_java::TAGS_QUERY,
                         "",
                     )
                     .unwrap(),
@@ -86,7 +86,7 @@ lazy_static! {
                 TagsConfigurationSync(
                     TagsConfiguration::new(
                         tree_sitter_ruby::language(),
-                        tree_sitter_ruby::TAGGING_QUERY,
+                        tree_sitter_ruby::TAGS_QUERY,
                         "",
                     )
                     .unwrap(),
@@ -131,6 +131,17 @@ lazy_static! {
                     TagsConfiguration::new(
                         tree_sitter_solidity::language(),
                         include_str!("../../queries/solidity.scm"),
+                        "",
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                "lua",
+                TagsConfigurationSync(
+                    TagsConfiguration::new(
+                        tree_sitter_lua::language(),
+                        tree_sitter_lua::TAGS_QUERY,
                         "",
                     )
                     .unwrap(),

@@ -1,19 +1,17 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use jsonwebtoken as jwt;
 use lazy_static::lazy_static;
 use serde::Deserialize;
 use tabby_db::DbConn;
-
-use crate::{
-    bail,
-    env::demo_mode,
-    schema::{
-        license::{LicenseInfo, LicenseService, LicenseStatus, LicenseType},
-        Result,
-    },
+use tabby_schema::{
+    is_demo_mode,
+    license::{LicenseInfo, LicenseService, LicenseStatus, LicenseType},
+    Result,
 };
+
+use crate::bail;
 
 lazy_static! {
     static ref LICENSE_DECODING_KEY: jwt::DecodingKey =
@@ -59,8 +57,7 @@ fn validate_license(token: &str) -> Result<LicenseJWTPayload, jwt::errors::Error
 }
 
 fn jwt_timestamp_to_utc(secs: i64) -> Result<DateTime<Utc>> {
-    let datetime = NaiveDateTime::from_timestamp_opt(secs, 0).context("Timestamp is corrupt")?;
-    Ok(datetime.and_utc())
+    Ok(DateTime::from_timestamp(secs, 0).context("Timestamp is corrupt")?)
 }
 
 struct LicenseServiceImpl {
@@ -131,7 +128,7 @@ fn license_info_from_raw(raw: LicenseJWTPayload, seats_used: usize) -> Result<Li
 #[async_trait]
 impl LicenseService for LicenseServiceImpl {
     async fn read(&self) -> Result<LicenseInfo> {
-        if demo_mode() {
+        if is_demo_mode() {
             return self.make_demo_license().await;
         }
 
@@ -147,8 +144,8 @@ impl LicenseService for LicenseServiceImpl {
     }
 
     async fn update(&self, license: String) -> Result<()> {
-        if demo_mode() {
-            bail!("Demo mode is enabled, cannot set license");
+        if is_demo_mode() {
+            bail!("Modifying license is disabled in demo mode");
         }
 
         let raw = validate_license(&license).map_err(|_e| anyhow!("License is not valid"))?;

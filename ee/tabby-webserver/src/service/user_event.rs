@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use juniper::ID;
 use tabby_db::DbConn;
+use tabby_schema::{
+    user_event::{UserEvent, UserEventService},
+    AsRowid, Result,
+};
 use tracing::warn;
 
-use super::{graphql_pagination_to_filter, AsRowid};
-use crate::schema::{
-    user_event::{UserEvent, UserEventService},
-    Result,
-};
+use super::graphql_pagination_to_filter;
 
 struct UserEventServiceImpl {
     db: DbConn,
@@ -59,9 +59,9 @@ fn convert_ids(ids: Vec<ID>) -> Vec<i64> {
 mod tests {
     use assert_matches::assert_matches;
     use chrono::{Days, Duration};
+    use tabby_schema::{user_event::EventKind, AsID};
 
     use super::*;
-    use crate::{schema::user_event::EventKind, service::AsID};
 
     fn timestamp() -> u128 {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -76,7 +76,7 @@ mod tests {
     async fn test_list_user_events() {
         let db = DbConn::new_in_memory().await.unwrap();
         let user1 = db
-            .create_user("test@example.com".into(), Some("pass".into()), true)
+            .create_user("test@example.com".into(), Some("pass".into()), true, None)
             .await
             .unwrap();
 
@@ -85,7 +85,7 @@ mod tests {
             .unwrap();
 
         let user2 = db
-            .create_user("test2@example.com".into(), Some("pass".into()), true)
+            .create_user("test2@example.com".into(), Some("pass".into()), true, None)
             .await
             .unwrap();
 

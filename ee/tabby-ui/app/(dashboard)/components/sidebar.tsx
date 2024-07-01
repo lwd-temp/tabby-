@@ -22,6 +22,8 @@ import {
   IconLightingBolt,
   IconUser
 } from '@/components/ui/icons'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { BANNER_HEIGHT, useShowDemoBanner } from '@/components/demo-banner'
 
 export interface SidebarProps {
   children?: React.ReactNode
@@ -30,12 +32,19 @@ export interface SidebarProps {
 
 export default function Sidebar({ children, className }: SidebarProps) {
   const [{ data }] = useMe()
+  const [isShowDemoBanner] = useShowDemoBanner()
   const isAdmin = data?.me.isAdmin
+  const style = isShowDemoBanner
+    ? { height: `calc(100vh - ${BANNER_HEIGHT})` }
+    : { height: '100vh' }
   return (
-    <div
+    <ScrollArea
       className={cn('grid overflow-hidden md:grid-cols-[280px_1fr]', className)}
     >
-      <div className="fixed inset-y-0 left-0 hidden w-[280px] border-r pt-4 md:block">
+      <div
+        className="hidden w-[280px] border-r pt-4 transition-all md:block"
+        style={style}
+      >
         <nav className="flex h-full flex-col overflow-hidden text-sm font-medium">
           <Link href="/" className="flex justify-center pb-4">
             <Image
@@ -94,8 +103,8 @@ export default function Sidebar({ children, className }: SidebarProps) {
                       </>
                     }
                   >
-                    <SidebarButton href="/settings/repository/git">
-                      Repository Providers
+                    <SidebarButton href="/settings/providers/git">
+                      Context Providers
                     </SidebarButton>
                     <SidebarButton href="/settings/sso">SSO</SidebarButton>
                     <SidebarButton href="/settings/mail">
@@ -108,7 +117,7 @@ export default function Sidebar({ children, className }: SidebarProps) {
           </div>
         </nav>
       </div>
-    </div>
+    </ScrollArea>
   )
 }
 
@@ -136,8 +145,8 @@ function SidebarButton({ href, children }: SidebarButtonProps) {
   const pathname = usePathname()
   const isSelected = React.useMemo(() => {
     if (href === '/') return href === pathname
-    if (href.startsWith('/settings/repository')) {
-      return pathname.startsWith('/settings/repository/')
+    if (href.startsWith('/settings/providers')) {
+      return pathname.startsWith('/settings/providers/')
     }
 
     return shouldPathnameHighlight(pathname, href)

@@ -1,19 +1,15 @@
 use std::sync::Arc;
 
-use lazy_static::lazy_static;
-use regex::Regex;
 use strfmt::strfmt;
 use tabby_common::{
-    api::code::{CodeSearch, CodeSearchError},
+    api::code::{CodeSearch, CodeSearchError, CodeSearchQuery},
     languages::get_language,
 };
-use textdistance::Algorithm;
 use tracing::warn;
 
 use super::{Segments, Snippet};
 
 static MAX_SNIPPETS_TO_FETCH: usize = 20;
-static MAX_SIMILARITY_THRESHOLD: f32 = 0.9;
 
 pub struct PromptBuilder {
     prompt_template: Option<String>,
@@ -64,6 +60,7 @@ impl PromptBuilder {
             max_snippets_chars_in_prompt,
             code.as_ref(),
             git_url,
+            segments.filepath.as_deref(),
             language,
             &segments.prefix,
         )
@@ -180,16 +177,20 @@ async fn collect_snippets(
     max_snippets_chars: usize,
     code: &dyn CodeSearch,
     git_url: &str,
+    filepath: Option<&str>,
     language: &str,
-    text: &str,
+    content: &str,
 ) -> Vec<Snippet> {
-    let mut ret = Vec::new();
-    let mut tokens = tokenize_text(text);
+    let query = CodeSearchQuery {
+        git_url: git_url.to_owned(),
+        filepath: filepath.map(|x| x.to_owned()),
+        language: language.to_owned(),
+        content: content.to_owned(),
+    };
 
-    let serp = match code
-        .search_in_language(git_url, language, &tokens, MAX_SNIPPETS_TO_FETCH, 0)
-        .await
-    {
+    let mut ret = Vec::new();
+
+    let serp = match code.search_in_language(query, MAX_SNIPPETS_TO_FETCH).await {
         Ok(serp) => serp,
         Err(CodeSearchError::NotReady) => {
             // Ignore.
@@ -212,56 +213,27 @@ async fn collect_snippets(
     let mut count_characters = 0;
     for hit in serp.hits {
         let body = hit.doc.body;
-        let mut body_tokens = tokenize_text(&body);
 
         if count_characters + body.len() > max_snippets_chars {
             break;
         }
 
-        let similarity = if body_tokens.len() > tokens.len() {
-            0.0
-        } else {
-            let distance = textdistance::LCSSeq::default()
-                .for_iter(tokens.iter(), body_tokens.iter())
-                .val() as f32;
-            distance / body_tokens.len() as f32
-        };
-
-        if similarity > MAX_SIMILARITY_THRESHOLD {
-            // Exclude snippets presents in context window.
-            continue;
-        }
-
-        // Prepend body tokens and update tokens, so future similarity calculation will consider
-        // added snippets.
-        body_tokens.append(&mut tokens);
-        tokens.append(&mut body_tokens);
-
         count_characters += body.len();
         ret.push(Snippet {
             filepath: hit.doc.filepath,
             body,
-            score: hit.score,
+            score: hit.scores.rrf,
         });
     }
 
     ret
 }
 
-lazy_static! {
-    static ref TOKENIZER: Regex = Regex::new(r"[^\w]").unwrap();
-}
-
-fn tokenize_text(text: &str) -> Vec<String> {
-    TOKENIZER
-        .split(text)
-        .map(|x| x.to_owned())
-        .filter(|x| !x.is_empty())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+    use tabby_common::api::code::CodeSearchResponse;
+
     use super::*;
     use crate::services::completion::Declaration;
 
@@ -287,6 +259,42 @@ mod tests {
             relevant_snippets_from_changed_files: None,
             clipboard: None,
         }
+    }
+
+    struct MockCodeSearch(fn() -> Result<CodeSearchResponse, CodeSearchError>);
+
+    #[async_trait]
+    impl CodeSearch for MockCodeSearch {
+        async fn search_in_language(
+            &self,
+            _query: CodeSearchQuery,
+            _limit: usize,
+        ) -> Result<CodeSearchResponse, CodeSearchError> {
+            (self.0)()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_snippets() {
+        // Not ready error from CodeSearch should result in empty snippets, rather than error
+        let search = MockCodeSearch(|| Err(CodeSearchError::NotReady));
+        let snippets = collect_snippets(150, &search, "", None, "", "").await;
+        assert_eq!(snippets, vec![]);
+
+        let search = MockCodeSearch(|| {
+            Ok(CodeSearchResponse {
+                hits: vec![Default::default()],
+            })
+        });
+        let snippets = collect_snippets(150, &search, "", None, "", "").await;
+        assert_eq!(
+            snippets,
+            vec![Snippet {
+                filepath: "".into(),
+                body: "".into(),
+                score: 0.0
+            }]
+        );
     }
 
     #[test]
@@ -455,38 +463,6 @@ def this_is_prefix():\n";
         assert_eq!(
             build_prefix("python", prefix, &snippets),
             expected_built_prefix
-        );
-    }
-
-    /// Empty strings tokens are not participating rag search and therefore could be removed.
-    #[test]
-    fn test_tokenized_text_filter() {
-        let prefix = r#"public static String getFileExtension(String fullName) {
-        String fileName = (new File(fullName)).getName();
-        int dotIndex = fileName.lastIndexOf('.');
-         }"#;
-
-        // with filter
-        assert_eq!(
-            tokenize_text(prefix),
-            [
-                "public",
-                "static",
-                "String",
-                "getFileExtension",
-                "String",
-                "fullName",
-                "String",
-                "fileName",
-                "new",
-                "File",
-                "fullName",
-                "getName",
-                "int",
-                "dotIndex",
-                "fileName",
-                "lastIndexOf",
-            ]
         );
     }
 

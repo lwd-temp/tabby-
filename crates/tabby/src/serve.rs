@@ -4,14 +4,14 @@ use axum::{routing, Router};
 use clap::Args;
 use hyper::StatusCode;
 use tabby_common::{
-    api,
-    api::{code::CodeSearch, event::EventLogger},
-    config::{Config, ConfigRepositoryAccess, RepositoryAccess},
+    api::{self, code::CodeSearch, event::EventLogger},
+    config::{Config, ConfigAccess, ModelConfig, StaticConfigAccess},
     usage,
 };
+use tabby_inference::Embedding;
 use tokio::time::sleep;
 use tower_http::timeout::TimeoutLayer;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use utoipa::{
     openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
     Modify, OpenApi,
@@ -21,15 +21,17 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::{
     routes::{self, run_app},
     services::{
-        chat,
-        chat::create_chat_service,
+        self, answer,
+        chat::{self, create_chat_service},
         code::create_code_search,
         completion::{self, create_completion_service},
+        embedding,
         event::create_event_logger,
         health,
         model::download_model_if_needed,
+        tantivy::IndexReaderProvider,
     },
-    Device,
+    to_local_config, Device,
 };
 
 #[derive(OpenApi)]
@@ -49,7 +51,7 @@ Install following IDE / Editor extensions to get started with [Tabby](https://gi
     servers(
         (url = "/", description = "Server"),
     ),
-    paths(routes::log_event, routes::completions, routes::chat_completions, routes::health, routes::search, routes::setting),
+    paths(routes::log_event, routes::completions, routes::chat_completions, routes::health, routes::answer, routes::setting),
     components(schemas(
         api::event::LogEventRequest,
         completion::CompletionRequest,
@@ -67,9 +69,11 @@ Install following IDE / Editor extensions to get started with [Tabby](https://gi
         chat::ChatCompletionChunk,
         health::HealthState,
         health::Version,
-        api::code::SearchResponse,
-        api::code::Hit,
-        api::code::HitDocument,
+        api::code::CodeSearchDocument,
+        api::code::CodeSearchQuery,
+        api::doc::DocSearchDocument,
+        answer::AnswerRequest,
+        answer::AnswerResponseChunk,
         api::server_setting::ServerSetting
     )),
     modifiers(&SecurityAddon),
@@ -116,16 +120,11 @@ pub struct ServeArgs {
 }
 
 pub async fn main(config: &Config, args: &ServeArgs) {
-    #[cfg(feature = "experimental-http")]
-    if args.device == Device::ExperimentalHttp {
-        tracing::warn!("HTTP device is unstable and does not comply with semver expectations.");
-    } else {
-        load_model(args).await;
-    }
-    #[cfg(not(feature = "experimental-http"))]
-    load_model(args).await;
+    let config = merge_args(config, args);
 
-    info!("Starting server, this might take a few minutes...");
+    load_model(&config).await;
+
+    debug!("Starting server, this might take a few minutes...");
 
     #[cfg(feature = "ee")]
     #[allow(deprecated)]
@@ -141,48 +140,69 @@ pub async fn main(config: &Config, args: &ServeArgs) {
         webserver = Some(!args.no_webserver)
     }
 
+    let embedding = embedding::create(&config.model.embedding).await;
+
     #[cfg(feature = "ee")]
     let ws = if !args.no_webserver {
-        Some(tabby_webserver::public::WebserverHandle::new(create_event_logger()).await)
+        Some(
+            tabby_webserver::public::Webserver::new(create_event_logger(), embedding.clone()).await,
+        )
     } else {
         None
     };
 
     let mut logger: Arc<dyn EventLogger> = Arc::new(create_event_logger());
-    let mut repository_access: Arc<dyn RepositoryAccess> = Arc::new(ConfigRepositoryAccess);
+    let mut config_access: Arc<dyn ConfigAccess> = Arc::new(StaticConfigAccess);
 
     #[cfg(feature = "ee")]
     if let Some(ws) = &ws {
         logger = ws.logger();
-        repository_access = ws.repository_access();
+        config_access = ws.clone();
     }
 
-    let code = Arc::new(create_code_search(repository_access));
-    let mut api = api_router(args, config, logger.clone(), code.clone(), webserver).await;
+    let index_reader_provider = Arc::new(IndexReaderProvider::default());
+
+    let code = Arc::new(create_code_search(
+        config_access,
+        embedding.clone(),
+        index_reader_provider.clone(),
+    ));
+    let mut api = api_router(
+        args,
+        &config,
+        logger.clone(),
+        code.clone(),
+        embedding,
+        index_reader_provider,
+        webserver,
+    )
+    .await;
     let mut ui = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .fallback(|| async { axum::response::Redirect::temporary("/swagger-ui") });
 
     #[cfg(feature = "ee")]
     if let Some(ws) = &ws {
-        let (new_api, new_ui) = ws
-            .attach_webserver(api, ui, code, args.chat_model.is_some(), args.port)
-            .await;
+        let (new_api, new_ui) = ws.attach(api, ui, code, config.model.chat.is_some()).await;
         api = new_api;
         ui = new_ui;
     };
 
-    start_heartbeat(args, webserver);
+    start_heartbeat(args, &config, webserver);
     run_app(api, Some(ui), args.host, args.port).await
 }
 
-async fn load_model(args: &ServeArgs) {
-    if let Some(model) = &args.model {
-        download_model_if_needed(model).await;
+async fn load_model(config: &Config) {
+    if let Some(ModelConfig::Local(ref model)) = config.model.completion {
+        download_model_if_needed(&model.model_id).await;
     }
 
-    if let Some(chat_model) = &args.chat_model {
-        download_model_if_needed(chat_model).await
+    if let Some(ModelConfig::Local(ref model)) = config.model.chat {
+        download_model_if_needed(&model.model_id).await;
+    }
+
+    if let ModelConfig::Local(ref model) = config.model.embedding {
+        download_model_if_needed(&model.model_id).await;
     }
 }
 
@@ -191,43 +211,43 @@ async fn api_router(
     config: &Config,
     logger: Arc<dyn EventLogger>,
     code: Arc<dyn CodeSearch>,
+    embedding: Arc<dyn Embedding>,
+    index_reader_provider: Arc<IndexReaderProvider>,
     webserver: Option<bool>,
 ) -> Router {
-    let completion_state = if let Some(model) = &args.model {
+    let model = &config.model;
+    let completion_state = if let Some(completion) = &model.completion {
         Some(Arc::new(
-            create_completion_service(
-                code.clone(),
-                logger.clone(),
-                model,
-                &args.device,
-                args.parallelism,
-            )
-            .await,
+            create_completion_service(code.clone(), logger.clone(), completion).await,
         ))
     } else {
         None
     };
 
-    let chat_state = if let Some(chat_model) = &args.chat_model {
-        Some(Arc::new(
-            create_chat_service(
-                logger.clone(),
-                chat_model,
-                args.chat_device.as_ref().unwrap_or(&args.device),
-                args.parallelism,
-            )
-            .await,
-        ))
+    let chat_state = if let Some(chat) = &model.chat {
+        Some(Arc::new(create_chat_service(logger.clone(), chat).await))
     } else {
         None
     };
+
+    let docsearch_state = Arc::new(services::doc::create(embedding, index_reader_provider));
+
+    let answer_state = chat_state.as_ref().map(|chat| {
+        Arc::new(services::answer::create(
+            chat.clone(),
+            code.clone(),
+            docsearch_state.clone(),
+        ))
+    });
 
     let mut routers = vec![];
 
     let health_state = Arc::new(health::HealthState::new(
-        args.model.as_deref(),
-        args.chat_model.as_deref(),
+        model,
         &args.device,
+        args.chat_model
+            .as_deref()
+            .map(|_| args.chat_device.as_ref().unwrap_or(&args.device)),
         webserver,
     ));
 
@@ -298,12 +318,18 @@ async fn api_router(
         });
     }
 
-    routers.push({
-        Router::new().route(
-            "/v1beta/search",
-            routing::get(routes::search).with_state(code),
-        )
-    });
+    if let Some(answer_state) = answer_state {
+        routers.push({
+            Router::new().route(
+                "/v1beta/answer",
+                routing::post(routes::answer).with_state(answer_state),
+            )
+        });
+    } else {
+        routers.push({
+            Router::new().route("/v1beta/answer", routing::post(StatusCode::NOT_IMPLEMENTED))
+        });
+    }
 
     let server_setting_router =
         Router::new().route("/v1beta/server_setting", routing::get(routes::setting));
@@ -323,13 +349,15 @@ async fn api_router(
     root
 }
 
-fn start_heartbeat(args: &ServeArgs, webserver: Option<bool>) {
-    let state = health::HealthState::new(
-        args.model.as_deref(),
-        args.chat_model.as_deref(),
+fn start_heartbeat(args: &ServeArgs, config: &Config, webserver: Option<bool>) {
+    let state = Arc::new(health::HealthState::new(
+        &config.model,
         &args.device,
+        args.chat_model
+            .as_deref()
+            .map(|_| args.chat_device.as_ref().unwrap_or(&args.device)),
         webserver,
-    );
+    ));
     tokio::spawn(async move {
         loop {
             usage::capture("ServeHealth", &state).await;
@@ -354,4 +382,27 @@ impl Modify for SecurityAddon {
             )
         }
     }
+}
+
+fn merge_args(config: &Config, args: &ServeArgs) -> Config {
+    let mut config = (*config).clone();
+    if let Some(model) = &args.model {
+        if config.model.completion.is_some() {
+            warn!("Overriding completion model from config.toml. The overriding behavior might surprise you. Consider setting the model in config.toml directly.");
+        }
+        config.model.completion = Some(to_local_config(model, args.parallelism, &args.device));
+    };
+
+    if let Some(chat_model) = &args.chat_model {
+        if config.model.chat.is_some() {
+            warn!("Overriding chat model from config.toml. The overriding behavior might surprise you. Consider setting the model in config.toml directly.");
+        }
+        config.model.chat = Some(to_local_config(
+            chat_model,
+            args.parallelism,
+            args.chat_device.as_ref().unwrap_or(&args.device),
+        ));
+    }
+
+    config
 }
